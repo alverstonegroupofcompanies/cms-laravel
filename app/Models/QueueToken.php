@@ -15,6 +15,7 @@ class QueueToken extends Model
         'token_number',
         'display_code',
         'status',
+        'end_of_line',
         'appointment_id',
         'called_at',
         'completed_at',
@@ -25,6 +26,7 @@ class QueueToken extends Model
         return [
             'queue_date' => 'date',
             'status' => QueueTokenStatus::class,
+            'end_of_line' => 'boolean',
             'called_at' => 'datetime',
             'completed_at' => 'datetime',
         ];

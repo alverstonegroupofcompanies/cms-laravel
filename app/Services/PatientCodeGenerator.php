@@ -6,11 +6,24 @@ use App\Models\Patient;
 
 class PatientCodeGenerator
 {
+    private const PREFIX = 'AMC';
+
     public function generate(): string
     {
-        $lastPatient = Patient::orderByDesc('id')->first();
-        $nextNumber = $lastPatient ? ((int) str_replace('PAT-', '', $lastPatient->patient_code)) + 1 : 1;
+        $maxNumber = Patient::query()
+            ->pluck('patient_code')
+            ->map(fn (string $code) => $this->extractNumber($code))
+            ->max() ?? 0;
 
-        return 'PAT-'.str_pad((string) $nextNumber, 6, '0', STR_PAD_LEFT);
+        return self::PREFIX.'-'.str_pad((string) ($maxNumber + 1), 6, '0', STR_PAD_LEFT);
+    }
+
+    private function extractNumber(string $code): int
+    {
+        if (preg_match('/(\d+)$/', $code, $matches)) {
+            return (int) $matches[1];
+        }
+
+        return 0;
     }
 }

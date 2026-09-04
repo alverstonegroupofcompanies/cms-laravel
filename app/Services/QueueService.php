@@ -13,36 +13,45 @@ use InvalidArgumentException;
 
 class QueueService
 {
-    public function joinQueue(int $patientId, int $doctorId, ?string $date = null, ?int $appointmentId = null): QueueToken
-    {
+    public function joinQueue(
+        int $patientId,
+        int $doctorId,
+        ?string $date = null,
+        ?int $appointmentId = null,
+        bool $endOfLine = false
+    ): QueueToken {
         $queueDate = $date ?? now()->toDateString();
 
-        $existing = QueueToken::where('patient_id', $patientId)
-            ->where('doctor_id', $doctorId)
-            ->whereDate('queue_date', $queueDate)
-            ->whereIn('status', [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation])
-            ->first();
+        if (! $endOfLine) {
+            $existing = QueueToken::where('patient_id', $patientId)
+                ->where('doctor_id', $doctorId)
+                ->whereDate('queue_date', $queueDate)
+                ->whereIn('status', [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation])
+                ->first();
 
-        if ($existing) {
-            return $existing->load(['patient', 'doctor']);
+            if ($existing) {
+                return $existing->load(['patient', 'doctor']);
+            }
         }
 
-        return DB::transaction(function () use ($patientId, $doctorId, $queueDate, $appointmentId) {
-            $lastToken = QueueToken::where('doctor_id', $doctorId)
-                ->whereDate('queue_date', $queueDate)
+        return DB::transaction(function () use ($patientId, $doctorId, $queueDate, $appointmentId, $endOfLine) {
+            // Clinic-wide daily sequence: AMC01, AMC02... resets each day; unique per date.
+            $lastToken = QueueToken::whereDate('queue_date', $queueDate)
                 ->lockForUpdate()
                 ->orderByDesc('token_number')
                 ->first();
 
             $tokenNumber = ($lastToken?->token_number ?? 0) + 1;
+            $displayCode = 'AMC'.str_pad((string) $tokenNumber, 2, '0', STR_PAD_LEFT);
 
             $token = QueueToken::create([
                 'patient_id' => $patientId,
                 'doctor_id' => $doctorId,
                 'queue_date' => $queueDate,
                 'token_number' => $tokenNumber,
-                'display_code' => 'Q-'.str_pad((string) $tokenNumber, 3, '0', STR_PAD_LEFT),
+                'display_code' => $displayCode,
                 'status' => QueueTokenStatus::Waiting,
+                'end_of_line' => $endOfLine,
                 'appointment_id' => $appointmentId,
             ]);
 
@@ -52,19 +61,272 @@ class QueueService
         });
     }
 
-    public function checkInAppointment(Appointment $appointment): QueueToken
+    /**
+     * Reception desk board for a date: queue tokens + pending online bookings,
+     * sorted by slot time, with late-arrival flags.
+     *
+     * @return array{rows: array<int, array<string, mixed>>, late: array<int, array<string, mixed>>}
+     */
+    public function getReceptionDayBoard(string $date): array
     {
-        if ($appointment->status !== AppointmentStatus::Booked) {
-            throw new InvalidArgumentException('Only booked appointments can be checked in.');
+        $now = Carbon::now();
+        $isToday = $date === $now->toDateString();
+
+        $tokens = QueueToken::with(['patient', 'doctor', 'appointment'])
+            ->whereDate('queue_date', $date)
+            ->whereNotIn('status', [QueueTokenStatus::Cancelled])
+            ->get();
+
+        $tokenAppointmentIds = $tokens->pluck('appointment_id')->filter()->all();
+
+        $pendingAppointments = Appointment::with(['patient', 'doctor'])
+            ->whereDate('appointment_date', $date)
+            ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
+            ->when(! empty($tokenAppointmentIds), fn ($q) => $q->whereNotIn('id', $tokenAppointmentIds))
+            ->get();
+
+        $rows = [];
+
+        foreach ($tokens as $token) {
+            $slotTime = $token->appointment?->slot_time
+                ? Carbon::parse($token->appointment->slot_time)->format('H:i:s')
+                : null;
+            $apptStatus = $token->appointment?->status?->value ?? ($token->appointment?->status ?? null);
+            $isLate = false;
+
+            if ($isToday && $slotTime && in_array($token->status, [QueueTokenStatus::Waiting], true)) {
+                $slotAt = Carbon::parse($date.' '.$slotTime);
+                $isLate = $now->gt($slotAt);
+            }
+
+            if ($isToday && $slotTime && $apptStatus === AppointmentStatus::Booked->value) {
+                $isLate = $now->gt(Carbon::parse($date.' '.$slotTime));
+            }
+
+            if ($token->end_of_line) {
+                $isLate = true;
+            }
+
+            // Late / end-of-line tokens sort after on-time booked patients (display hint)
+            $endOfLine = (bool) $token->end_of_line || $isLate;
+            $sortTime = $endOfLine
+                ? 'zz-'.$token->created_at?->format('H:i:s')
+                : ($slotTime ?? ($token->created_at?->format('H:i:s') ?? '99:99:99'));
+
+            $rows[] = [
+                'kind' => 'token',
+                'id' => $token->id,
+                'token_id' => $token->id,
+                'token_number' => $token->token_number,
+                'display_code' => $token->display_code,
+                'status' => $token->status->value,
+                'board_status' => $this->boardStatus($token->status->value, $apptStatus, $isLate),
+                'is_late' => $isLate,
+                'end_of_line' => $endOfLine,
+                'can_check_in' => in_array($apptStatus, [AppointmentStatus::Booked->value, AppointmentStatus::NoShow->value], true)
+                    && $token->appointment_id
+                    && $token->status === QueueTokenStatus::Waiting,
+                'queue_date' => $token->queue_date?->toDateString(),
+                'slot_time' => $slotTime,
+                'sort_time' => $sortTime,
+                'called_at' => $token->called_at,
+                'completed_at' => $token->completed_at,
+                'checked_out_at' => $token->status === QueueTokenStatus::Completed ? $token->completed_at : null,
+                'created_at' => $token->created_at,
+                'source' => $token->appointment?->type === 'walk_in' || ! $token->appointment_id ? 'walk_in' : 'online',
+                'patient' => $this->patientPayload($token->patient),
+                'doctor' => $this->doctorPayload($token->doctor),
+                'appointment' => $token->appointment ? [
+                    'id' => $token->appointment->id,
+                    'slot_time' => $slotTime,
+                    'status' => $apptStatus,
+                    'type' => $token->appointment->type,
+                ] : null,
+            ];
         }
 
+        foreach ($pendingAppointments as $appointment) {
+            $slotTime = $appointment->slot_time
+                ? Carbon::parse($appointment->slot_time)->format('H:i:s')
+                : null;
+            $isLate = $isToday && $slotTime && $now->gt(Carbon::parse($date.' '.$slotTime));
+            $isMissed = ($appointment->status?->value ?? $appointment->status) === AppointmentStatus::NoShow->value;
+            if ($isMissed) {
+                $isLate = true;
+            }
+
+            $rows[] = [
+                'kind' => 'appointment',
+                'id' => 'appt-'.$appointment->id,
+                'token_id' => null,
+                'token_number' => null,
+                'display_code' => '—',
+                'status' => $isMissed ? 'no_show' : 'pending_arrival',
+                'board_status' => $isLate ? 'late' : 'pending_arrival',
+                'is_late' => $isLate,
+                'end_of_line' => $isLate,
+                'can_check_in' => true,
+                'queue_date' => $date,
+                'slot_time' => $slotTime,
+                'sort_time' => $isLate ? 'zz-pending-'.$appointment->id : ($slotTime ?? '99:99:99'),
+                'called_at' => null,
+                'completed_at' => null,
+                'checked_out_at' => null,
+                'created_at' => $appointment->created_at,
+                'source' => $appointment->type === 'walk_in' ? 'walk_in' : 'online',
+                'patient' => $this->patientPayload($appointment->patient),
+                'doctor' => $this->doctorPayload($appointment->doctor),
+                'appointment' => [
+                    'id' => $appointment->id,
+                    'slot_time' => $slotTime,
+                    'status' => $appointment->status?->value ?? $appointment->status,
+                    'type' => $appointment->type,
+                ],
+            ];
+        }
+
+        usort($rows, function (array $a, array $b) {
+            $cmp = strcmp((string) $a['sort_time'], (string) $b['sort_time']);
+            if ($cmp !== 0) {
+                return $cmp;
+            }
+
+            return ($a['token_number'] ?? 9999) <=> ($b['token_number'] ?? 9999);
+        });
+
+        $late = array_values(array_filter($rows, fn (array $r) => ! empty($r['is_late'])));
+
+        return [
+            'rows' => array_values($rows),
+            'late' => $late,
+        ];
+    }
+
+    /** @deprecated use getReceptionDayBoard */
+    public function getDayTokens(string $date): array
+    {
+        return $this->getReceptionDayBoard($date)['rows'];
+    }
+
+    private function boardStatus(string $tokenStatus, ?string $apptStatus, bool $isLate): string
+    {
+        if ($tokenStatus === QueueTokenStatus::Completed->value) {
+            return 'checked_out';
+        }
+        if ($tokenStatus === QueueTokenStatus::InConsultation->value) {
+            return 'in_consultation';
+        }
+        if ($isLate) {
+            return 'late';
+        }
+        if ($apptStatus === AppointmentStatus::CheckedIn->value || $tokenStatus === QueueTokenStatus::Waiting->value) {
+            return 'checked_in';
+        }
+
+        return $tokenStatus;
+    }
+
+    private function patientPayload($patient): ?array
+    {
+        if (! $patient) {
+            return null;
+        }
+
+        return [
+            'id' => $patient->id,
+            'name' => $patient->name,
+            'patient_code' => $patient->patient_code,
+            'phone' => $patient->phone,
+            'email' => $patient->email,
+            'gender' => $patient->gender,
+        ];
+    }
+
+    private function doctorPayload($doctor): ?array
+    {
+        if (! $doctor) {
+            return null;
+        }
+
+        return [
+            'id' => $doctor->id,
+            'name' => $doctor->name,
+            'specialization' => $doctor->specialization,
+        ];
+    }
+
+    public function checkInAppointment(Appointment $appointment): QueueToken
+    {
+        $allowed = [AppointmentStatus::Booked, AppointmentStatus::CheckedIn, AppointmentStatus::NoShow];
+        if (! in_array($appointment->status, $allowed, true)) {
+            throw new InvalidArgumentException('Only booked or missed appointments can be checked in.');
+        }
+
+        $date = $appointment->appointment_date->toDateString();
+        $slotTime = $appointment->slot_time
+            ? Carbon::parse($appointment->slot_time)->format('H:i:s')
+            : null;
+        $isLate = $slotTime && Carbon::now()->gt(Carbon::parse($date.' '.$slotTime));
+        $wasMissed = $appointment->status === AppointmentStatus::NoShow;
+
+        // Late / missed: new token at end of line — does not jump ahead of next patients or reuse slot priority.
+        if ($isLate || $wasMissed) {
+            return DB::transaction(function () use ($appointment, $date) {
+                QueueToken::query()
+                    ->where(function ($q) use ($appointment, $date) {
+                        $q->where('appointment_id', $appointment->id)
+                            ->orWhere(function ($q2) use ($appointment, $date) {
+                                $q2->where('patient_id', $appointment->patient_id)
+                                    ->where('doctor_id', $appointment->doctor_id)
+                                    ->whereDate('queue_date', $date)
+                                    ->whereIn('status', [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation]);
+                            });
+                    })
+                    ->whereIn('status', [QueueTokenStatus::Waiting])
+                    ->update(['status' => QueueTokenStatus::Cancelled]);
+
+                $appointment->update(['status' => AppointmentStatus::CheckedIn]);
+
+                $token = $this->joinQueue(
+                    $appointment->patient_id,
+                    $appointment->doctor_id,
+                    $date,
+                    $appointment->id,
+                    true // end of line
+                );
+
+                return $token->load(['patient', 'doctor', 'appointment']);
+            });
+        }
+
+        $existing = QueueToken::query()
+            ->where(function ($q) use ($appointment, $date) {
+                $q->where('appointment_id', $appointment->id)
+                    ->orWhere(function ($q2) use ($appointment, $date) {
+                        $q2->where('patient_id', $appointment->patient_id)
+                            ->where('doctor_id', $appointment->doctor_id)
+                            ->whereDate('queue_date', $date)
+                            ->whereNotIn('status', [QueueTokenStatus::Cancelled]);
+                    });
+            })
+            ->first();
+
         $appointment->update(['status' => AppointmentStatus::CheckedIn]);
+
+        if ($existing) {
+            if (! $existing->appointment_id) {
+                $existing->update(['appointment_id' => $appointment->id]);
+            }
+
+            return $existing->fresh()->load(['patient', 'doctor', 'appointment']);
+        }
 
         return $this->joinQueue(
             $appointment->patient_id,
             $appointment->doctor_id,
-            $appointment->appointment_date->toDateString(),
-            $appointment->id
+            $date,
+            $appointment->id,
+            false
         );
     }
 
@@ -179,14 +441,29 @@ class QueueService
 
     private function getOrderedQueue(int $doctorId, string $date)
     {
+        $now = Carbon::now();
+        $isToday = $date === $now->toDateString();
+
         return QueueToken::with(['patient', 'appointment'])
             ->where('doctor_id', $doctorId)
             ->whereDate('queue_date', $date)
             ->whereNotIn('status', [QueueTokenStatus::Cancelled])
             ->get()
-            ->sortBy(function (QueueToken $token) {
-                $priority = $token->appointment_id ? 0 : 1;
-                $time = $token->appointment?->slot_time ?? $token->created_at?->format('H:i:s');
+            ->sortBy(function (QueueToken $token) use ($date, $now, $isToday) {
+                $slotTime = $token->appointment?->slot_time
+                    ? Carbon::parse($token->appointment->slot_time)->format('H:i:s')
+                    : null;
+
+                $pastSlot = $isToday && $slotTime && $now->gt(Carbon::parse($date.' '.$slotTime));
+                $endOfLine = (bool) $token->end_of_line
+                    || ! $token->appointment_id
+                    || ($pastSlot && $token->status === QueueTokenStatus::Waiting);
+
+                // 0 = on-time booked (keep slot order). 1 = late / walk-in / new ticket (end of line).
+                $priority = $endOfLine ? 1 : 0;
+                $time = $endOfLine
+                    ? str_pad((string) $token->token_number, 6, '0', STR_PAD_LEFT)
+                    : ($slotTime ?? '99:99:99');
 
                 return "{$priority}-{$time}-{$token->token_number}";
             })

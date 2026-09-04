@@ -8,6 +8,7 @@ class OtpCode extends Model
 {
     protected $fillable = [
         'phone',
+        'email',
         'code',
         'expires_at',
         'verified',

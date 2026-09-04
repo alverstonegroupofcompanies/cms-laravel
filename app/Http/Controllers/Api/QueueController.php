@@ -35,6 +35,27 @@ class QueueController extends Controller
         ], 201);
     }
 
+    public function dayBoard(Request $request, QueueService $queueService): JsonResponse
+    {
+        $data = $request->validate([
+            'date' => ['nullable', 'date'],
+        ]);
+
+        $date = $data['date'] ?? now()->toDateString();
+        $board = $queueService->getReceptionDayBoard($date);
+        $lastNumber = \App\Models\QueueToken::whereDate('queue_date', $date)->max('token_number') ?? 0;
+        $nextNumber = (int) $lastNumber + 1;
+
+        return response()->json([
+            'date' => $date,
+            'tokens' => $board['rows'],
+            'rows' => $board['rows'],
+            'late' => $board['late'],
+            'next_token' => 'AMC'.str_pad((string) $nextNumber, 2, '0', STR_PAD_LEFT),
+            'next_token_number' => $nextNumber,
+        ]);
+    }
+
     public function status(Request $request, QueueService $queueService): JsonResponse
     {
         $data = $request->validate([

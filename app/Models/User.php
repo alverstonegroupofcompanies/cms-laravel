@@ -20,11 +20,16 @@ class User extends Authenticatable
         'password',
         'role',
         'status',
+        'must_reset_password',
     ];
 
     protected $hidden = [
         'password',
         'remember_token',
+    ];
+
+    protected $appends = [
+        'has_password',
     ];
 
     protected function casts(): array
@@ -33,7 +38,13 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'role' => UserRole::class,
+            'must_reset_password' => 'boolean',
         ];
+    }
+
+    public function getHasPasswordAttribute(): bool
+    {
+        return ! empty($this->attributes['password'] ?? null);
     }
 
     public function patient(): HasOne

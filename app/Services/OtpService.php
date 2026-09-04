@@ -2,24 +2,30 @@
 
 namespace App\Services;
 
+use App\Mail\OtpMail;
 use App\Models\OtpCode;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 
 class OtpService
 {
-    public function send(string $phone): array
+    public function send(string $email): array
     {
         $code = app()->environment('local', 'testing') ? '123456' : (string) random_int(100000, 999999);
 
-        OtpCode::where('phone', $phone)->delete();
+        OtpCode::where('email', $email)->delete();
 
         OtpCode::create([
-            'phone' => $phone,
+            'email' => $email,
             'code' => $code,
             'expires_at' => now()->addMinutes(10),
         ]);
 
-        Log::info("OTP for {$phone}: {$code}");
+        if (app()->environment('local', 'testing')) {
+            Log::info("OTP for {$email}: {$code}");
+        } else {
+            Mail::to($email)->send(new OtpMail($code));
+        }
 
         return [
             'message' => 'OTP sent successfully',
@@ -27,9 +33,9 @@ class OtpService
         ];
     }
 
-    public function verify(string $phone, string $code): bool
+    public function verify(string $email, string $code): bool
     {
-        $otp = OtpCode::where('phone', $phone)
+        $otp = OtpCode::where('email', $email)
             ->where('code', $code)
             ->where('expires_at', '>', now())
             ->where('verified', false)
