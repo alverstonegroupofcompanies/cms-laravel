@@ -6,9 +6,12 @@ use App\Enums\DoctorStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Storage;
 
 class Doctor extends Model
 {
+    protected $appends = ['photo_url'];
+
     protected $fillable = [
         'user_id',
         'clinic_id',
@@ -16,7 +19,9 @@ class Doctor extends Model
         'name',
         'specialization',
         'phone',
+        'phone_secondary',
         'email',
+        'photo_path',
         'status',
         'consultation_fee',
         'lunch_start',
@@ -29,6 +34,15 @@ class Doctor extends Model
             'status' => DoctorStatus::class,
             'consultation_fee' => 'decimal:2',
         ];
+    }
+
+    public function getPhotoUrlAttribute(): ?string
+    {
+        if (! $this->photo_path) {
+            return null;
+        }
+
+        return Storage::disk('public')->url($this->photo_path);
     }
 
     public function user(): BelongsTo

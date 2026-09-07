@@ -57,8 +57,31 @@ class User extends Authenticatable
         return $this->hasOne(Doctor::class);
     }
 
-    public function hasRole(UserRole ...$roles): bool
+    public function hasRole(UserRole|string ...$roles): bool
     {
-        return in_array($this->role, $roles, true);
+        $current = $this->role instanceof UserRole
+            ? $this->role->value
+            : strtolower(trim((string) ($this->attributes['role'] ?? $this->role ?? '')));
+
+        foreach ($roles as $role) {
+            $value = $role instanceof UserRole ? $role->value : strtolower(trim((string) $role));
+            if ($current !== '' && $current === $value) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Receptionist and admin — full clinic staff (patient/doctor management). */
+    public function isClinicStaff(): bool
+    {
+        return $this->hasRole(
+            UserRole::Admin,
+            UserRole::Receptionist,
+            'admin',
+            'receptionist',
+            'staff'
+        );
     }
 }

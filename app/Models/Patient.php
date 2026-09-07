@@ -5,10 +5,13 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\Storage;
 
 class Patient extends Model
 {
+    use SoftDeletes;
+
     protected $appends = ['photo_url'];
 
     protected $fillable = [
@@ -81,5 +84,10 @@ class Patient extends Model
     public function labOrders(): HasMany
     {
         return $this->hasMany(LabOrder::class);
+    }
+
+    public function worksheets(): HasMany
+    {
+        return $this->hasMany(Worksheet::class);
     }
 }

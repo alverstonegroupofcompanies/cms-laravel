@@ -13,6 +13,7 @@ class LabOrder extends Model
         'patient_id',
         'doctor_id',
         'queue_token_id',
+        'worksheet_id',
         'status',
         'notes',
     ];
@@ -30,6 +31,11 @@ class LabOrder extends Model
     public function queueToken(): BelongsTo
     {
         return $this->belongsTo(QueueToken::class);
+    }
+
+    public function worksheet(): BelongsTo
+    {
+        return $this->belongsTo(Worksheet::class);
     }
 
     public function items(): HasMany

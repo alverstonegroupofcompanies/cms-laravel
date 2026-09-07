@@ -10,7 +10,15 @@ class LabOrderItem extends Model
     protected $fillable = [
         'lab_order_id',
         'lab_test_id',
+        'results',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'results' => 'array',
+        ];
+    }
 
     public function labOrder(): BelongsTo
     {

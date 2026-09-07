@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Enums\QueueTokenStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class QueueToken extends Model
 {
@@ -45,5 +46,10 @@ class QueueToken extends Model
     public function appointment(): BelongsTo
     {
         return $this->belongsTo(Appointment::class);
+    }
+
+    public function worksheet(): HasOne
+    {
+        return $this->hasOne(Worksheet::class);
     }
 }

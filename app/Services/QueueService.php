@@ -7,6 +7,7 @@ use App\Enums\QueueTokenStatus;
 use App\Events\QueueUpdated;
 use App\Models\Appointment;
 use App\Models\QueueToken;
+use App\Models\Worksheet;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -30,7 +31,16 @@ class QueueService
                 ->first();
 
             if ($existing) {
-                return $existing->load(['patient', 'doctor']);
+                if ($appointmentId) {
+                    if (! $existing->appointment_id) {
+                        $existing->update(['appointment_id' => $appointmentId]);
+                    }
+                    Appointment::where('id', $appointmentId)
+                        ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
+                        ->update(['status' => AppointmentStatus::CheckedIn]);
+                }
+
+                return $existing->fresh()->load(['patient', 'doctor', 'appointment']);
             }
         }
 
@@ -55,9 +65,15 @@ class QueueService
                 'appointment_id' => $appointmentId,
             ]);
 
+            if ($appointmentId) {
+                Appointment::where('id', $appointmentId)
+                    ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
+                    ->update(['status' => AppointmentStatus::CheckedIn]);
+            }
+
             event(new QueueUpdated($doctorId, $queueDate));
 
-            return $token->load(['patient', 'doctor']);
+            return $token->load(['patient', 'doctor', 'appointment']);
         });
     }
 
@@ -67,14 +83,15 @@ class QueueService
      *
      * @return array{rows: array<int, array<string, mixed>>, late: array<int, array<string, mixed>>}
      */
-    public function getReceptionDayBoard(string $date): array
+    public function getReceptionDayBoard(string $date, ?int $doctorId = null): array
     {
         $now = Carbon::now();
         $isToday = $date === $now->toDateString();
 
-        $tokens = QueueToken::with(['patient', 'doctor', 'appointment'])
+        $tokens = QueueToken::with(['patient', 'doctor', 'appointment', 'worksheet'])
             ->whereDate('queue_date', $date)
             ->whereNotIn('status', [QueueTokenStatus::Cancelled])
+            ->when($doctorId, fn ($q) => $q->where('doctor_id', $doctorId))
             ->get();
 
         $tokenAppointmentIds = $tokens->pluck('appointment_id')->filter()->all();
@@ -82,6 +99,7 @@ class QueueService
         $pendingAppointments = Appointment::with(['patient', 'doctor'])
             ->whereDate('appointment_date', $date)
             ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
+            ->when($doctorId, fn ($q) => $q->where('doctor_id', $doctorId))
             ->when(! empty($tokenAppointmentIds), fn ($q) => $q->whereNotIn('id', $tokenAppointmentIds))
             ->get();
 
@@ -92,23 +110,10 @@ class QueueService
                 ? Carbon::parse($token->appointment->slot_time)->format('H:i:s')
                 : null;
             $apptStatus = $token->appointment?->status?->value ?? ($token->appointment?->status ?? null);
+
+            // In-queue tokens are never Late; end_of_line only affects sort + EOL badge.
             $isLate = false;
-
-            if ($isToday && $slotTime && in_array($token->status, [QueueTokenStatus::Waiting], true)) {
-                $slotAt = Carbon::parse($date.' '.$slotTime);
-                $isLate = $now->gt($slotAt);
-            }
-
-            if ($isToday && $slotTime && $apptStatus === AppointmentStatus::Booked->value) {
-                $isLate = $now->gt(Carbon::parse($date.' '.$slotTime));
-            }
-
-            if ($token->end_of_line) {
-                $isLate = true;
-            }
-
-            // Late / end-of-line tokens sort after on-time booked patients (display hint)
-            $endOfLine = (bool) $token->end_of_line || $isLate;
+            $endOfLine = (bool) $token->end_of_line;
             $sortTime = $endOfLine
                 ? 'zz-'.$token->created_at?->format('H:i:s')
                 : ($slotTime ?? ($token->created_at?->format('H:i:s') ?? '99:99:99'));
@@ -119,13 +124,15 @@ class QueueService
                 'token_id' => $token->id,
                 'token_number' => $token->token_number,
                 'display_code' => $token->display_code,
+                'worksheet_id' => $token->worksheet?->id,
+                'worksheet_code' => $token->worksheet?->worksheet_code,
                 'status' => $token->status->value,
                 'board_status' => $this->boardStatus($token->status->value, $apptStatus, $isLate),
                 'is_late' => $isLate,
                 'end_of_line' => $endOfLine,
-                'can_check_in' => in_array($apptStatus, [AppointmentStatus::Booked->value, AppointmentStatus::NoShow->value], true)
-                    && $token->appointment_id
-                    && $token->status === QueueTokenStatus::Waiting,
+                // Already in queue → check in to doctor; with doctor → check out after visit.
+                'can_check_in' => $token->status === QueueTokenStatus::Waiting,
+                'can_checkout' => $token->status === QueueTokenStatus::InConsultation,
                 'queue_date' => $token->queue_date?->toDateString(),
                 'slot_time' => $slotTime,
                 'sort_time' => $sortTime,
@@ -166,6 +173,7 @@ class QueueService
                 'is_late' => $isLate,
                 'end_of_line' => $isLate,
                 'can_check_in' => true,
+                'can_checkout' => false,
                 'queue_date' => $date,
                 'slot_time' => $slotTime,
                 'sort_time' => $isLate ? 'zz-pending-'.$appointment->id : ($slotTime ?? '99:99:99'),
@@ -196,10 +204,83 @@ class QueueService
 
         $late = array_values(array_filter($rows, fn (array $r) => ! empty($r['is_late'])));
 
+        $doctorIds = collect($rows)
+            ->map(fn (array $r) => $r['doctor']['id'] ?? null)
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        $averages = $this->averageConsultMinutesByDoctor($doctorIds);
+
+        foreach ($rows as &$row) {
+            $id = $row['doctor']['id'] ?? null;
+            $row['avg_consult_minutes'] = $id ? ($averages[(int) $id] ?? 30) : 30;
+        }
+        unset($row);
+
+        foreach ($late as &$lateRow) {
+            $id = $lateRow['doctor']['id'] ?? null;
+            $lateRow['avg_consult_minutes'] = $id ? ($averages[(int) $id] ?? 30) : 30;
+        }
+        unset($lateRow);
+
         return [
             'rows' => array_values($rows),
             'late' => $late,
+            'consult_averages' => $averages,
         ];
+    }
+
+    /**
+     * Typical consult length per doctor from recent completed visits.
+     * Falls back toward 30 minutes until enough history exists.
+     *
+     * @param  array<int, int|string>  $doctorIds
+     * @return array<int, int>
+     */
+    public function averageConsultMinutesByDoctor(array $doctorIds, int $lookbackDays = 30): array
+    {
+        $defaults = [];
+        foreach ($doctorIds as $id) {
+            $defaults[(int) $id] = 30;
+        }
+
+        if ($defaults === []) {
+            return $defaults;
+        }
+
+        $since = now()->subDays($lookbackDays)->startOfDay();
+
+        $stats = QueueToken::query()
+            ->select('doctor_id')
+            ->selectRaw('COUNT(*) as samples')
+            ->selectRaw('AVG(TIMESTAMPDIFF(MINUTE, called_at, completed_at)) as avg_mins')
+            ->whereIn('doctor_id', array_keys($defaults))
+            ->where('status', QueueTokenStatus::Completed)
+            ->whereNotNull('called_at')
+            ->whereNotNull('completed_at')
+            ->where('completed_at', '>=', $since)
+            ->whereRaw('TIMESTAMPDIFF(MINUTE, called_at, completed_at) BETWEEN 3 AND 180')
+            ->groupBy('doctor_id')
+            ->get();
+
+        foreach ($stats as $row) {
+            $doctorId = (int) $row->doctor_id;
+            $samples = (int) $row->samples;
+            $avg = (float) $row->avg_mins;
+
+            if ($samples >= 3) {
+                $minutes = (int) round($avg);
+            } else {
+                // Blend sparse history with the 30-min default so early estimates stay stable.
+                $minutes = (int) round((($avg * $samples) + (30 * (3 - $samples))) / 3);
+            }
+
+            $defaults[$doctorId] = max(10, min(90, $minutes));
+        }
+
+        return $defaults;
     }
 
     /** @deprecated use getReceptionDayBoard */
@@ -333,21 +414,49 @@ class QueueService
     public function getQueueStatus(int $doctorId, string $date): array
     {
         $tokens = $this->getOrderedQueue($doctorId, $date);
+        $now = Carbon::now();
+        $hasActiveConsult = $tokens->contains(
+            fn (QueueToken $t) => $t->status === QueueTokenStatus::InConsultation
+        );
 
-        return $tokens->map(function (QueueToken $token, int $index) {
+        return $tokens->map(function (QueueToken $token, int $index) use ($now, $hasActiveConsult) {
+            $slotTime = $token->appointment?->slot_time
+                ? Carbon::parse($token->appointment->slot_time)->format('H:i:s')
+                : null;
+
+            $joinedAt = $token->created_at;
+            $waitingMinutes = null;
+            if (
+                $token->status === QueueTokenStatus::Waiting
+                && $joinedAt
+            ) {
+                $waitingMinutes = max(0, $joinedAt->diffInMinutes($now));
+            }
+
+            $isWaiting = $token->status === QueueTokenStatus::Waiting;
+            $isConsulting = $token->status === QueueTokenStatus::InConsultation;
+
             return [
                 'id' => $token->id,
                 'token_number' => $token->token_number,
                 'display_code' => $token->display_code,
                 'status' => $token->status->value,
                 'position' => $index + 1,
+                'slot_time' => $slotTime,
+                'joined_at' => $joinedAt?->toIso8601String(),
+                'called_at' => $token->called_at?->toIso8601String(),
+                'waiting_minutes' => $waitingMinutes,
+                'end_of_line' => (bool) $token->end_of_line,
+                // Ready in queue → check in to doctor; in consult → check out after visit.
+                'can_check_in' => $isWaiting,
+                'can_checkout' => $isConsulting,
+                'has_active_consult' => $hasActiveConsult,
                 'patient' => [
                     'id' => $token->patient->id,
                     'name' => $token->patient->name,
                     'patient_code' => $token->patient->patient_code,
                 ],
                 'appointment_id' => $token->appointment_id,
-                'called_at' => $token->called_at,
             ];
         })->values()->all();
     }
@@ -364,16 +473,79 @@ class QueueService
             return null;
         }
 
-        $queue = $this->getOrderedQueue($doctorId, $date)
-            ->filter(fn (QueueToken $t) => in_array($t->status, [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation]));
+        return $this->positionPayload($token, $date);
+    }
+
+    /**
+     * Patient's active queue visit for a date (any doctor).
+     */
+    public function getPatientActiveQueue(int $patientId, ?string $date = null): ?array
+    {
+        $queueDate = $date ?? now()->toDateString();
+
+        $token = QueueToken::with(['doctor', 'appointment', 'patient'])
+            ->where('patient_id', $patientId)
+            ->whereDate('queue_date', $queueDate)
+            ->whereIn('status', [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation])
+            ->orderByRaw("CASE WHEN status = 'in_consultation' THEN 0 ELSE 1 END")
+            ->orderBy('token_number')
+            ->first();
+
+        if (! $token) {
+            return null;
+        }
+
+        return $this->positionPayload($token, $queueDate);
+    }
+
+    private function positionPayload(QueueToken $token, string $date): array
+    {
+        $queue = $this->getOrderedQueue($token->doctor_id, $date)
+            ->filter(fn (QueueToken $t) => in_array($t->status, [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation], true))
+            ->values();
 
         $position = $queue->search(fn (QueueToken $t) => $t->id === $token->id);
+        $isWaiting = $token->status === QueueTokenStatus::Waiting;
+        $isConsulting = $token->status === QueueTokenStatus::InConsultation;
+
+        $consultMinutes = $this->averageConsultMinutesByDoctor([(int) $token->doctor_id])[(int) $token->doctor_id] ?? 30;
+        $activeConsult = $queue->first(fn (QueueToken $t) => $t->status === QueueTokenStatus::InConsultation);
+        $remaining = $consultMinutes;
+        if ($activeConsult?->called_at) {
+            $remaining = max(0, $consultMinutes - $activeConsult->called_at->diffInMinutes(now()));
+        }
+
+        $estimatedWait = 0;
+        $statusLabel = $isConsulting ? 'With doctor' : 'In queue';
+        if ($isConsulting) {
+            $estimatedWait = $remaining;
+        } elseif ($isWaiting && $position !== false) {
+            $waitingAhead = $queue
+                ->take($position)
+                ->filter(fn (QueueToken $t) => $t->status === QueueTokenStatus::Waiting)
+                ->count();
+            if ($activeConsult) {
+                // Never report 0 while someone is still with the doctor.
+                $estimatedWait = max(1, $remaining) + ($waitingAhead * $consultMinutes);
+            } else {
+                $estimatedWait = $waitingAhead * $consultMinutes;
+                if ($waitingAhead === 0) {
+                    $statusLabel = 'Ready to enter';
+                }
+            }
+        }
 
         return [
-            'token' => $token->load('doctor'),
-            'position' => $position !== false ? $position + 1 : null,
-            'estimated_wait_minutes' => $position !== false ? $position * 10 : 0,
+            'token' => $token->loadMissing(['doctor', 'appointment', 'patient']),
+            'position' => $isWaiting && $position !== false ? $position + 1 : ($isConsulting ? 0 : null),
+            'estimated_wait_minutes' => $estimatedWait,
+            'avg_consult_minutes' => $consultMinutes,
             'queue_length' => $queue->count(),
+            'status' => $token->status->value,
+            'status_label' => $statusLabel,
+            'display_code' => $token->display_code,
+            'joined_at' => $token->created_at?->toIso8601String(),
+            'called_at' => $token->called_at?->toIso8601String(),
         ];
     }
 
@@ -382,13 +554,7 @@ class QueueService
         $queueDate = $date ?? now()->toDateString();
 
         return DB::transaction(function () use ($doctorId, $queueDate) {
-            QueueToken::where('doctor_id', $doctorId)
-                ->whereDate('queue_date', $queueDate)
-                ->where('status', QueueTokenStatus::InConsultation)
-                ->update([
-                    'status' => QueueTokenStatus::Completed,
-                    'completed_at' => now(),
-                ]);
+            $this->completeActiveConsultations($doctorId, $queueDate);
 
             $next = $this->getOrderedQueue($doctorId, $queueDate)
                 ->first(fn (QueueToken $t) => $t->status === QueueTokenStatus::Waiting);
@@ -399,15 +565,44 @@ class QueueService
                 return null;
             }
 
-            $next->update([
-                'status' => QueueTokenStatus::InConsultation,
-                'called_at' => now(),
-            ]);
-
-            event(new QueueUpdated($doctorId, $queueDate));
-
-            return $next->load(['patient', 'doctor']);
+            return $this->startConsultation($next);
         });
+    }
+
+    /**
+     * Check in a specific waiting patient to the doctor (start consultation).
+     * Any patient already with the doctor is checked out first.
+     */
+    public function checkInToConsult(int $tokenId): QueueToken
+    {
+        return DB::transaction(function () use ($tokenId) {
+            $token = QueueToken::with(['patient', 'doctor', 'appointment'])->findOrFail($tokenId);
+
+            if ($token->status !== QueueTokenStatus::Waiting) {
+                throw new \InvalidArgumentException('Only waiting patients can be checked in to the doctor.');
+            }
+
+            $queueDate = $token->queue_date->toDateString();
+            $this->completeActiveConsultations($token->doctor_id, $queueDate);
+
+            $token = $token->fresh(['patient', 'doctor', 'appointment']);
+
+            return $this->startConsultation($token);
+        });
+    }
+
+    /**
+     * Check out after meeting the doctor (complete consultation).
+     */
+    public function checkOutFromConsult(int $tokenId): QueueToken
+    {
+        $token = QueueToken::findOrFail($tokenId);
+
+        if ($token->status !== QueueTokenStatus::InConsultation) {
+            throw new \InvalidArgumentException('Only patients with the doctor can be checked out.');
+        }
+
+        return $this->complete($tokenId);
     }
 
     public function complete(int $tokenId): QueueToken
@@ -424,15 +619,112 @@ class QueueService
                 ->update(['status' => AppointmentStatus::Completed]);
         }
 
+        $this->closeWorksheetForToken($token->id);
+
         event(new QueueUpdated($token->doctor_id, $token->queue_date->toDateString()));
 
-        return $token->load(['patient', 'doctor']);
+        return $token->load(['patient', 'doctor', 'worksheet']);
+    }
+
+    private function completeActiveConsultations(int $doctorId, string $queueDate): void
+    {
+        $active = QueueToken::query()
+            ->where('doctor_id', $doctorId)
+            ->whereDate('queue_date', $queueDate)
+            ->where('status', QueueTokenStatus::InConsultation)
+            ->get();
+
+        foreach ($active as $token) {
+            $token->update([
+                'status' => QueueTokenStatus::Completed,
+                'completed_at' => now(),
+            ]);
+
+            if ($token->appointment_id) {
+                Appointment::where('id', $token->appointment_id)
+                    ->update(['status' => AppointmentStatus::Completed]);
+            }
+
+            $this->closeWorksheetForToken($token->id);
+        }
+    }
+
+    private function startConsultation(QueueToken $token): QueueToken
+    {
+        $token->update([
+            'status' => QueueTokenStatus::InConsultation,
+            'called_at' => now(),
+        ]);
+
+        if ($token->appointment_id) {
+            Appointment::where('id', $token->appointment_id)
+                ->where('status', '!=', AppointmentStatus::Completed)
+                ->update(['status' => AppointmentStatus::CheckedIn]);
+        }
+
+        $this->ensureWorksheetForToken($token);
+
+        event(new QueueUpdated($token->doctor_id, $token->queue_date->toDateString()));
+
+        return $token->fresh()->load(['patient', 'doctor', 'worksheet']);
+    }
+
+    /** Create a unique clinical worksheet for this consult visit if missing. */
+    public function ensureWorksheetForToken(QueueToken $token): Worksheet
+    {
+        $existing = Worksheet::where('queue_token_id', $token->id)->first();
+        if ($existing) {
+            return $existing;
+        }
+
+        return Worksheet::create([
+            'worksheet_code' => $this->nextWorksheetCode(),
+            'patient_id' => $token->patient_id,
+            'doctor_id' => $token->doctor_id,
+            'queue_token_id' => $token->id,
+            'appointment_id' => $token->appointment_id,
+            'status' => 'open',
+            'opened_at' => now(),
+        ]);
+    }
+
+    private function closeWorksheetForToken(int $tokenId): void
+    {
+        $worksheets = Worksheet::with(['doctor', 'prescriptions.items.medicine', 'labOrders.items.labTest'])
+            ->where('queue_token_id', $tokenId)
+            ->where('status', 'open')
+            ->get();
+
+        foreach ($worksheets as $worksheet) {
+            $worksheet->update([
+                'status' => 'closed',
+                'closed_at' => now(),
+            ]);
+            app(VisitBillService::class)->createFromWorksheet($worksheet);
+        }
+    }
+
+    private function nextWorksheetCode(): string
+    {
+        $prefix = 'WS-'.now()->format('Ymd').'-';
+        $last = Worksheet::where('worksheet_code', 'like', $prefix.'%')
+            ->orderByDesc('worksheet_code')
+            ->value('worksheet_code');
+
+        $seq = 1;
+        if ($last && preg_match('/-(\d+)$/', $last, $m)) {
+            $seq = (int) $m[1] + 1;
+        }
+
+        return $prefix.str_pad((string) $seq, 4, '0', STR_PAD_LEFT);
     }
 
     public function cancel(int $tokenId): QueueToken
     {
         $token = QueueToken::findOrFail($tokenId);
         $token->update(['status' => QueueTokenStatus::Cancelled]);
+
+        $this->closeWorksheetForToken($token->id);
 
         event(new QueueUpdated($token->doctor_id, $token->queue_date->toDateString()));
 

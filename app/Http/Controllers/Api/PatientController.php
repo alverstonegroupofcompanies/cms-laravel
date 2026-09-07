@@ -3,14 +3,17 @@
 namespace App\Http\Controllers\Api;
 
 use App\Enums\AppointmentStatus;
+use App\Enums\UserRole;
 use App\Http\Controllers\Controller;
 use App\Models\Appointment;
 use App\Models\Doctor;
 use App\Models\Patient;
+use App\Models\User;
 use App\Services\PatientCodeGenerator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
@@ -34,17 +37,19 @@ class PatientController extends Controller
 
     public function store(Request $request, PatientCodeGenerator $codeGenerator): JsonResponse
     {
+        $this->ensureStaff($request);
+
         $data = $request->validate([
             'first_name' => ['required', 'string', 'max:100'],
             'last_name' => ['nullable', 'string', 'max:100'],
             'phone' => ['required', 'string', 'max:20', 'unique:patients,phone'],
-            'email' => ['nullable', 'email', 'max:255'],
+            'email' => ['nullable', 'email', 'max:255', 'unique:patients,email'],
             'gender' => ['nullable', Rule::in(['male', 'female', 'other'])],
             'dob' => ['nullable', 'date', 'before:today'],
             'address' => ['nullable', 'string'],
             'blood_group' => ['nullable', Rule::in(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'])],
             'emergency_contact' => ['nullable', 'string', 'max:255'],
-            'photo' => ['nullable', 'image', 'max:2048'],
+            'photo' => ['nullable', 'image', 'max:5120'],
         ]);
 
         $fullName = trim($data['first_name'].' '.($data['last_name'] ?? ''));
@@ -56,7 +61,7 @@ class PatientController extends Controller
             'first_name' => $data['first_name'],
             'last_name' => $data['last_name'] ?? null,
             'phone' => $data['phone'],
-            'email' => $data['email'] ?? null,
+            'email' => isset($data['email']) ? strtolower(trim($data['email'])) : null,
             'gender' => $data['gender'] ?? null,
             'dob' => $data['dob'] ?? null,
             'address' => $data['address'] ?? null,
@@ -68,8 +73,119 @@ class PatientController extends Controller
         return response()->json($patient, 201);
     }
 
-    public function issueLogin(Patient $patient): JsonResponse
+    public function update(Request $request, Patient $patient): JsonResponse
     {
+        $this->ensureCanUpdatePatient($request);
+
+        $data = $request->validate([
+            'first_name' => ['required', 'string', 'max:100'],
+            'last_name' => ['nullable', 'string', 'max:100'],
+            'phone' => [
+                'required',
+                'string',
+                'max:20',
+                Rule::unique('patients', 'phone')->ignore($patient->id),
+                Rule::unique('users', 'phone')->ignore($patient->user_id),
+            ],
+            'email' => [
+                'nullable',
+                'email',
+                'max:255',
+                Rule::unique('patients', 'email')->ignore($patient->id),
+                Rule::unique('users', 'email')->ignore($patient->user_id),
+            ],
+            'gender' => ['nullable', Rule::in(['male', 'female', 'other'])],
+            'dob' => ['nullable', 'date', 'before:today'],
+            'address' => ['nullable', 'string'],
+            'blood_group' => ['nullable', Rule::in(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'])],
+            'emergency_contact' => ['nullable', 'string', 'max:255'],
+            'emergency_contact_phone' => ['nullable', 'string', 'max:20'],
+            'emergency_contact_first_name' => ['nullable', 'string', 'max:100'],
+            'emergency_contact_last_name' => ['nullable', 'string', 'max:100'],
+            'emergency_contact_relationship' => ['nullable', 'string', 'max:100'],
+            'photo' => ['nullable', 'image', 'max:5120'],
+        ]);
+
+        $fullName = trim($data['first_name'].' '.($data['last_name'] ?? ''));
+        $email = ! empty($data['email']) ? strtolower(trim($data['email'])) : null;
+        $photoPath = $this->storePhoto($request) ?? $patient->photo_path;
+
+        $patient->update([
+            'name' => $fullName,
+            'first_name' => $data['first_name'],
+            'last_name' => $data['last_name'] ?? null,
+            'phone' => $data['phone'],
+            'email' => $email,
+            'gender' => $data['gender'] ?? null,
+            'dob' => $data['dob'] ?? null,
+            'address' => $data['address'] ?? null,
+            'blood_group' => $data['blood_group'] ?? null,
+            'emergency_contact' => $data['emergency_contact'] ?? null,
+            'emergency_contact_phone' => $data['emergency_contact_phone'] ?? $patient->emergency_contact_phone,
+            'emergency_contact_first_name' => $data['emergency_contact_first_name'] ?? $patient->emergency_contact_first_name,
+            'emergency_contact_last_name' => $data['emergency_contact_last_name'] ?? $patient->emergency_contact_last_name,
+            'emergency_contact_relationship' => $data['emergency_contact_relationship'] ?? $patient->emergency_contact_relationship,
+            'photo_path' => $photoPath,
+        ]);
+
+        if ($patient->user_id) {
+            $userUpdates = [
+                'name' => $fullName,
+                'phone' => $data['phone'],
+            ];
+            if ($email) {
+                $userUpdates['email'] = $email;
+            }
+            User::where('id', $patient->user_id)
+                ->where('role', UserRole::Patient)
+                ->update($userUpdates);
+        }
+
+        return response()->json(
+            $this->withVisitSummaries(collect([$patient->fresh()]))->first()
+        );
+    }
+
+    public function destroy(Request $request, Patient $patient): JsonResponse
+    {
+        $this->ensureStaff($request);
+
+        DB::transaction(function () use ($patient) {
+            $user = $patient->user;
+
+            // Free unique phone/email/code so the same details can be re-registered.
+            $patient->update([
+                'phone' => 'D'.$patient->id,
+                'email' => $patient->email ? 'deleted+'.$patient->id.'@deleted.local' : null,
+                'patient_code' => 'DEL-'.$patient->id,
+            ]);
+
+            if ($user && $user->role === UserRole::Patient) {
+                $user->tokens()->delete();
+                $user->update([
+                    'status' => 'inactive',
+                    'email' => 'deleted+user'.$user->id.'@deleted.local',
+                    'phone' => 'U'.$user->id,
+                ]);
+            }
+
+            // Cancel future booked / checked-in appointments before soft-delete.
+            Appointment::query()
+                ->where('patient_id', $patient->id)
+                ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::CheckedIn])
+                ->whereDate('appointment_date', '>=', now()->toDateString())
+                ->update(['status' => AppointmentStatus::Cancelled]);
+
+            $patient->delete();
+        });
+
+        return response()->json(['message' => 'Patient deleted successfully.']);
+    }
+
+    public function issueLogin(Request $request, Patient $patient): JsonResponse
+    {
+        $this->ensureStaff($request);
+
         if ($patient->user_id) {
             return response()->json(['message' => 'Patient already has login access.'], 422);
         }
@@ -77,12 +193,12 @@ class PatientController extends Controller
         $tempPassword = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
         $email = $patient->email ?: $patient->phone.'@patient.clinic.local';
 
-        $user = \App\Models\User::create([
+        $user = User::create([
             'name' => $patient->name,
             'email' => $email,
             'phone' => $patient->phone,
             'password' => $tempPassword,
-            'role' => \App\Enums\UserRole::Patient,
+            'role' => UserRole::Patient,
             'status' => 'active',
             'must_reset_password' => true,
         ]);
@@ -144,7 +260,7 @@ class PatientController extends Controller
             'emergency_contact_last_name' => ['nullable', 'string', 'max:100'],
             'emergency_contact_relationship' => ['nullable', 'string', 'max:100'],
             'emergency_contact_phone' => ['nullable', 'string', 'max:20'],
-            'photo' => ['nullable', 'image', 'max:2048'],
+            'photo' => ['nullable', 'image', 'max:5120'],
         ]);
 
         $fullName = trim($data['first_name'].' '.($data['last_name'] ?? ''));
@@ -277,5 +393,44 @@ class PatientController extends Controller
         }
 
         return $request->file('photo')->store('patient-photos', 'public');
+    }
+
+    private function ensureStaff(Request $request): void
+    {
+        $user = $request->user();
+
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+
+        if ($user->isClinicStaff()) {
+            return;
+        }
+
+        $role = $user->role instanceof UserRole
+            ? $user->role->value
+            : (string) ($user->getAttributes()['role'] ?? 'unknown');
+
+        abort(403, "Only clinic staff (receptionist/admin) can manage patients. Your role is '{$role}'.");
+    }
+
+    private function ensureCanUpdatePatient(Request $request): void
+    {
+        $user = $request->user();
+
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+
+        // Doctors may update demographics during consult; receptionist/admin have full staff access.
+        if ($user->isClinicStaff() || $user->hasRole(UserRole::Doctor, 'doctor')) {
+            return;
+        }
+
+        $role = $user->role instanceof UserRole
+            ? $user->role->value
+            : (string) ($user->getAttributes()['role'] ?? 'unknown');
+
+        abort(403, "Only clinical staff can update patients. Your role is '{$role}'.");
     }
 }

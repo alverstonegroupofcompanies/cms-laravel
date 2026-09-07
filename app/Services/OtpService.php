@@ -11,7 +11,11 @@ class OtpService
 {
     public function send(string $email): array
     {
-        $code = app()->environment('local', 'testing') ? '123456' : (string) random_int(100000, 999999);
+        $email = strtolower(trim($email));
+        $skipMail = $this->shouldSkipMail();
+        $code = $skipMail && app()->environment('local', 'testing')
+            ? '123456'
+            : (string) random_int(100000, 999999);
 
         OtpCode::where('email', $email)->delete();
 
@@ -21,25 +25,55 @@ class OtpService
             'expires_at' => now()->addMinutes(10),
         ]);
 
-        if (app()->environment('local', 'testing')) {
-            Log::info("OTP for {$email}: {$code}");
+        $mailSent = false;
+
+        if ($skipMail) {
+            Log::info("OTP for {$email}: {$code} (mail skipped)");
         } else {
-            Mail::to($email)->send(new OtpMail($code));
+            try {
+                Mail::to($email)->send(new OtpMail($code));
+                $mailSent = true;
+                Log::info("OTP mailed to {$email}");
+            } catch (\Throwable $e) {
+                Log::error('OTP mail failed', [
+                    'email' => $email,
+                    'error' => $e->getMessage(),
+                ]);
+
+                // Keep the code usable in local/dev so registration is not blocked by SMTP.
+                if (app()->environment('local', 'testing')) {
+                    Log::info("OTP for {$email}: {$code} (mail failed; use this code)");
+                } else {
+                    throw new \RuntimeException('Failed to send OTP email. Please try again later.');
+                }
+            }
         }
 
+        $exposeDevOtp = ! $mailSent && app()->environment('local', 'testing');
+
         return [
-            'message' => 'OTP sent successfully',
-            'dev_otp' => app()->environment('local', 'testing') ? $code : null,
+            'message' => $mailSent
+                ? 'OTP sent successfully'
+                : 'OTP generated. Check your inbox, or use the on-screen code if email was skipped.',
+            'mail_sent' => $mailSent,
+            'dev_otp' => $exposeDevOtp ? $code : null,
         ];
     }
 
+    /**
+     * Check whether a code is valid without consuming it.
+     */
+    public function isValid(string $email, string $code): bool
+    {
+        return $this->findValid($email, $code) !== null;
+    }
+
+    /**
+     * Validate and mark the OTP as used.
+     */
     public function verify(string $email, string $code): bool
     {
-        $otp = OtpCode::where('email', $email)
-            ->where('code', $code)
-            ->where('expires_at', '>', now())
-            ->where('verified', false)
-            ->first();
+        $otp = $this->findValid($email, $code);
 
         if (! $otp) {
             return false;
@@ -48,5 +82,27 @@ class OtpService
         $otp->update(['verified' => true]);
 
         return true;
+    }
+
+    private function findValid(string $email, string $code): ?OtpCode
+    {
+        $email = strtolower(trim($email));
+
+        return OtpCode::where('email', $email)
+            ->where('code', $code)
+            ->where('expires_at', '>', now())
+            ->where('verified', false)
+            ->first();
+    }
+
+    private function shouldSkipMail(): bool
+    {
+        if (filter_var(env('OTP_SKIP_MAIL', false), FILTER_VALIDATE_BOOLEAN)) {
+            return true;
+        }
+
+        $mailer = (string) config('mail.default');
+
+        return in_array($mailer, ['array', 'log'], true);
     }
 }

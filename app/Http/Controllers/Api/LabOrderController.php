@@ -2,10 +2,14 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Enums\UserRole;
 use App\Http\Controllers\Controller;
 use App\Models\LabOrder;
 use App\Models\LabOrderItem;
 use App\Models\LabReport;
+use App\Models\VisitBill;
+use App\Models\VisitBillItem;
+use App\Services\VisitBillService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -13,10 +17,33 @@ use Illuminate\Support\Facades\Storage;
 
 class LabOrderController extends Controller
 {
+    private function withRelations()
+    {
+        return [
+            'patient',
+            'doctor',
+            'items.labTest',
+            'report',
+            'queueToken:id,display_code,token_number,queue_date',
+            'worksheet:id,worksheet_code,queue_token_id,opened_at',
+        ];
+    }
+
     public function index(Request $request): JsonResponse
     {
-        $orders = LabOrder::with(['patient', 'doctor', 'items.labTest', 'report'])
-            ->when($request->patient_id, fn ($q, $id) => $q->where('patient_id', $id))
+        $user = $request->user();
+        $patientId = $request->patient_id ? (int) $request->patient_id : null;
+
+        if ($user?->role === UserRole::Patient || $user?->role === 'patient') {
+            $ownId = $user->patient?->id;
+            if (! $ownId) {
+                return response()->json(['data' => []]);
+            }
+            $patientId = $ownId;
+        }
+
+        $orders = LabOrder::with($this->withRelations())
+            ->when($patientId, fn ($q) => $q->where('patient_id', $patientId))
             ->when($request->status, fn ($q, $status) => $q->where('status', $status))
             ->latest()
             ->paginate(20);
@@ -30,6 +57,7 @@ class LabOrderController extends Controller
             'patient_id' => ['required', 'exists:patients,id'],
             'doctor_id' => ['required', 'exists:doctors,id'],
             'queue_token_id' => ['nullable', 'exists:queue_tokens,id'],
+            'worksheet_id' => ['nullable', 'exists:worksheets,id'],
             'notes' => ['nullable', 'string'],
             'test_ids' => ['required', 'array', 'min:1'],
             'test_ids.*' => ['exists:lab_tests,id'],
@@ -40,6 +68,7 @@ class LabOrderController extends Controller
                 'patient_id' => $data['patient_id'],
                 'doctor_id' => $data['doctor_id'],
                 'queue_token_id' => $data['queue_token_id'] ?? null,
+                'worksheet_id' => $data['worksheet_id'] ?? null,
                 'notes' => $data['notes'] ?? null,
                 'status' => 'ordered',
             ]);
@@ -54,12 +83,12 @@ class LabOrderController extends Controller
             return $order;
         });
 
-        return response()->json($order->load(['patient', 'doctor', 'items.labTest']), 201);
+        return response()->json($order->load($this->withRelations()), 201);
     }
 
     public function show(LabOrder $labOrder): JsonResponse
     {
-        return response()->json($labOrder->load(['patient', 'doctor', 'items.labTest', 'report']));
+        return response()->json($labOrder->load($this->withRelations()));
     }
 
     public function uploadReport(Request $request, LabOrder $labOrder): JsonResponse
@@ -86,9 +115,41 @@ class LabOrderController extends Controller
 
         $labOrder->update(['status' => 'completed']);
 
+        VisitBillItem::where('lab_order_id', $labOrder->id)
+            ->where('section', 'lab')
+            ->update(['status' => 'done']);
+
+        $billIds = VisitBillItem::where('lab_order_id', $labOrder->id)
+            ->pluck('visit_bill_id')
+            ->unique();
+        foreach ($billIds as $billId) {
+            $bill = VisitBill::find($billId);
+            if ($bill) {
+                app(VisitBillService::class)->refreshCompletion($bill);
+            }
+        }
+
         return response()->json([
-            'order' => $labOrder->fresh()->load(['patient', 'doctor', 'items.labTest', 'report']),
+            'order' => $labOrder->fresh()->load($this->withRelations()),
             'report_url' => Storage::disk('public')->url($path),
         ]);
+    }
+
+    public function saveResults(Request $request, LabOrder $labOrder): JsonResponse
+    {
+        $data = $request->validate([
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.id' => ['required', 'integer', 'exists:lab_order_items,id'],
+            'items.*.results' => ['nullable', 'array'],
+        ]);
+
+        foreach ($data['items'] as $row) {
+            LabOrderItem::query()
+                ->where('lab_order_id', $labOrder->id)
+                ->where('id', (int) $row['id'])
+                ->update(['results' => $row['results'] ?? null]);
+        }
+
+        return response()->json($labOrder->fresh()->load($this->withRelations()));
     }
 }
