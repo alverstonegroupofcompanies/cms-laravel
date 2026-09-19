@@ -268,4 +268,19 @@ class SlotGeneratorService
 
         return $dates;
     }
+
+    /** True when the doctor has weekly hours for this date and is not on leave. */
+    public function doctorWorksOnDate(int $doctorId, string $date): bool
+    {
+        $onLeave = DoctorLeave::where('doctor_id', $doctorId)->whereDate('leave_date', $date)->exists();
+        if ($onLeave) {
+            return false;
+        }
+
+        $dayOfWeek = Carbon::parse($date)->dayOfWeek;
+
+        return DoctorAvailability::where('doctor_id', $doctorId)
+            ->where('day_of_week', $dayOfWeek)
+            ->exists();
+    }
 }

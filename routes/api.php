@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\LabOrderController;
 use App\Http\Controllers\Api\LabTestController;
 use App\Http\Controllers\Api\MedicineController;
 use App\Http\Controllers\Api\PatientController;
+use App\Http\Controllers\Api\PharmacySalesController;
 use App\Http\Controllers\Api\PrescriptionController;
 use App\Http\Controllers\Api\QueueController;
 use App\Http\Controllers\Api\StaffController;
@@ -23,6 +24,7 @@ Route::prefix('auth')->group(function () {
     Route::post('/register-patient', [AuthController::class, 'registerPatient']);
     Route::post('/patient-login', [AuthController::class, 'patientLogin']);
     Route::post('/login', [AuthController::class, 'login']);
+    Route::post('/reset-password-with-otp', [AuthController::class, 'resetPasswordWithOtp']);
     Route::post('/dev-login/{role}', [AuthController::class, 'devLogin']);
 });
 
@@ -44,6 +46,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/patients/me', [PatientController::class, 'me']);
     Route::patch('/patients/me', [PatientController::class, 'updateMe']);
+    Route::get('/patients/my-patients', [PatientController::class, 'myPatients']);
     Route::post('/patients/{patient}/issue-login', [PatientController::class, 'issueLogin']);
     Route::get('/patients/search', [PatientController::class, 'search']);
     Route::apiResource('patients', PatientController::class)->only(['index', 'store', 'show', 'update', 'destroy']);
@@ -80,6 +83,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/dashboard/peak-booking-hours', [DashboardController::class, 'peakBookingHours']);
 
     Route::get('/medicines', [MedicineController::class, 'index']);
+    Route::post('/medicines/resolve', [MedicineController::class, 'resolve']);
     Route::post('/medicines', [MedicineController::class, 'store']);
     Route::patch('/medicines/{medicine}', [MedicineController::class, 'update']);
 
@@ -107,6 +111,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/visit-bills/{visitBill}/lab-items', [VisitBillController::class, 'updateLabItems']);
     Route::post('/visit-bills/{visitBill}/pharmacy-done', [VisitBillController::class, 'markPharmacyDone']);
     Route::post('/visit-bills/{visitBill}/lab-done', [VisitBillController::class, 'markLabDone']);
+    Route::get('/pharmacy/sales', [PharmacySalesController::class, 'index']);
 
     Route::get('/staff', [StaffController::class, 'index']);
     Route::post('/staff/receptionist', [StaffController::class, 'storeReceptionist']);

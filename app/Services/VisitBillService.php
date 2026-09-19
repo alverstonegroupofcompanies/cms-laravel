@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\LabOrder;
 use App\Models\VisitBill;
 use App\Models\VisitBillItem;
 use App\Models\Worksheet;
@@ -232,6 +233,7 @@ class VisitBillService
                 }
 
                 if (! $item->included) {
+                    $item->purchased = false;
                     $item->status = 'skipped';
                     $item->amount = 0;
                 } elseif ($item->status === 'skipped') {
@@ -271,15 +273,52 @@ class VisitBillService
             $bill->items()
                 ->where('section', $section)
                 ->where('included', true)
-                ->where('status', 'pending')
-                ->update(['status' => 'done']);
+                ->update([
+                    'status' => 'done',
+                    'purchased' => true,
+                ]);
             $bill->items()
                 ->where('section', $section)
                 ->where('included', false)
                 ->update([
                     'status' => 'skipped',
+                    'purchased' => false,
                     'amount' => 0,
                 ]);
+
+            // Keep linked lab orders in sync so the patient portal sees completed work.
+            if ($section === 'lab') {
+                $orderIds = $bill->items()
+                    ->where('section', 'lab')
+                    ->whereNotNull('lab_order_id')
+                    ->pluck('lab_order_id')
+                    ->unique()
+                    ->filter();
+                if ($orderIds->isNotEmpty()) {
+                    $cancelledOrderIds = $bill->items()
+                        ->where('section', 'lab')
+                        ->whereIn('lab_order_id', $orderIds)
+                        ->get()
+                        ->groupBy('lab_order_id')
+                        ->filter(fn ($items) => $items->every(fn (VisitBillItem $i) => ! $i->included))
+                        ->keys();
+
+                    if ($cancelledOrderIds->isNotEmpty()) {
+                        LabOrder::query()
+                            ->whereIn('id', $cancelledOrderIds)
+                            ->where('status', '!=', 'cancelled')
+                            ->update(['status' => 'cancelled']);
+                    }
+
+                    $completeOrderIds = $orderIds->diff($cancelledOrderIds);
+                    if ($completeOrderIds->isNotEmpty()) {
+                        LabOrder::query()
+                            ->whereIn('id', $completeOrderIds)
+                            ->where('status', '!=', 'cancelled')
+                            ->update(['status' => 'completed']);
+                    }
+                }
+            }
         }
 
         $this->recalculateTotals($bill->fresh(['items']));

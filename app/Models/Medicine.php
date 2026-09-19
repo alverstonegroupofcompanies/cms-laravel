@@ -8,8 +8,13 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Medicine extends Model
 {
     protected $fillable = [
+        'clinic_product_id',
+        'clinic_external_id',
         'name',
         'generic_name',
+        'sku',
+        'strength',
+        'manufacturer',
         'unit',
         'stock_quantity',
         'unit_price',
@@ -19,6 +24,7 @@ class Medicine extends Model
     protected function casts(): array
     {
         return [
+            'clinic_product_id' => 'integer',
             'unit_price' => 'decimal:2',
             'is_active' => 'boolean',
         ];

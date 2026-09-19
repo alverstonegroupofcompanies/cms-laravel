@@ -8,6 +8,7 @@ use App\Events\QueueUpdated;
 use App\Models\Appointment;
 use App\Models\QueueToken;
 use App\Models\Worksheet;
+use App\Services\SlotGeneratorService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -19,9 +20,18 @@ class QueueService
         int $doctorId,
         ?string $date = null,
         ?int $appointmentId = null,
-        bool $endOfLine = false
+        bool $endOfLine = false,
+        bool $checkIn = true
     ): QueueToken {
         $queueDate = $date ?? now()->toDateString();
+
+        // Pure walk-in / queue join (no prior booked appointment): doctor must work that day.
+        if (! $appointmentId) {
+            $works = app(SlotGeneratorService::class)->doctorWorksOnDate($doctorId, $queueDate);
+            if (! $works) {
+                throw new InvalidArgumentException('Doctor not available today.');
+            }
+        }
 
         if (! $endOfLine) {
             $existing = QueueToken::where('patient_id', $patientId)
@@ -35,16 +45,18 @@ class QueueService
                     if (! $existing->appointment_id) {
                         $existing->update(['appointment_id' => $appointmentId]);
                     }
-                    Appointment::where('id', $appointmentId)
-                        ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
-                        ->update(['status' => AppointmentStatus::CheckedIn]);
+                    if ($checkIn) {
+                        Appointment::where('id', $appointmentId)
+                            ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
+                            ->update(['status' => AppointmentStatus::CheckedIn]);
+                    }
                 }
 
                 return $existing->fresh()->load(['patient', 'doctor', 'appointment']);
             }
         }
 
-        return DB::transaction(function () use ($patientId, $doctorId, $queueDate, $appointmentId, $endOfLine) {
+        return DB::transaction(function () use ($patientId, $doctorId, $queueDate, $appointmentId, $endOfLine, $checkIn) {
             // Clinic-wide daily sequence: AMC01, AMC02... resets each day; unique per date.
             $lastToken = QueueToken::whereDate('queue_date', $queueDate)
                 ->lockForUpdate()
@@ -65,7 +77,7 @@ class QueueService
                 'appointment_id' => $appointmentId,
             ]);
 
-            if ($appointmentId) {
+            if ($appointmentId && $checkIn) {
                 Appointment::where('id', $appointmentId)
                     ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
                     ->update(['status' => AppointmentStatus::CheckedIn]);
@@ -117,6 +129,8 @@ class QueueService
             $sortTime = $endOfLine
                 ? 'zz-'.$token->created_at?->format('H:i:s')
                 : ($slotTime ?? ($token->created_at?->format('H:i:s') ?? '99:99:99'));
+            $boardStatus = $this->boardStatus($token->status->value, $apptStatus, $isLate);
+            $reservedOnly = $boardStatus === 'booked';
 
             $rows[] = [
                 'kind' => 'token',
@@ -127,12 +141,13 @@ class QueueService
                 'worksheet_id' => $token->worksheet?->id,
                 'worksheet_code' => $token->worksheet?->worksheet_code,
                 'status' => $token->status->value,
-                'board_status' => $this->boardStatus($token->status->value, $apptStatus, $isLate),
+                'board_status' => $boardStatus,
                 'is_late' => $isLate,
                 'end_of_line' => $endOfLine,
-                // Already in queue → check in to doctor; with doctor → check out after visit.
+                // Reserved booking → arrival check-in; already in queue → send to doctor.
                 'can_check_in' => $token->status === QueueTokenStatus::Waiting,
                 'can_checkout' => $token->status === QueueTokenStatus::InConsultation,
+                'reserved_only' => $reservedOnly,
                 'queue_date' => $token->queue_date?->toDateString(),
                 'slot_time' => $slotTime,
                 'sort_time' => $sortTime,
@@ -300,6 +315,13 @@ class QueueService
         if ($isLate) {
             return 'late';
         }
+        // Reserved at booking time, patient not yet arrived.
+        if (
+            $tokenStatus === QueueTokenStatus::Waiting->value
+            && $apptStatus === AppointmentStatus::Booked->value
+        ) {
+            return 'booked';
+        }
         if ($apptStatus === AppointmentStatus::CheckedIn->value || $tokenStatus === QueueTokenStatus::Waiting->value) {
             return 'checked_in';
         }
@@ -451,6 +473,8 @@ class QueueService
                 'can_check_in' => $isWaiting,
                 'can_checkout' => $isConsulting,
                 'has_active_consult' => $hasActiveConsult,
+                'worksheet_id' => $token->worksheet?->id,
+                'worksheet_code' => $token->worksheet?->worksheet_code,
                 'patient' => [
                     'id' => $token->patient->id,
                     'name' => $token->patient->name,
@@ -736,7 +760,7 @@ class QueueService
         $now = Carbon::now();
         $isToday = $date === $now->toDateString();
 
-        return QueueToken::with(['patient', 'appointment'])
+        return QueueToken::with(['patient', 'appointment', 'worksheet'])
             ->where('doctor_id', $doctorId)
             ->whereDate('queue_date', $date)
             ->whereNotIn('status', [QueueTokenStatus::Cancelled])

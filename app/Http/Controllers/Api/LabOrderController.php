@@ -33,22 +33,44 @@ class LabOrderController extends Controller
     {
         $user = $request->user();
         $patientId = $request->patient_id ? (int) $request->patient_id : null;
+        $isPatient = $user?->hasRole(UserRole::Patient, 'patient') ?? false;
 
-        if ($user?->role === UserRole::Patient || $user?->role === 'patient') {
-            $ownId = $user->patient?->id;
+        if ($isPatient) {
+            $ownId = $user->patient?->id
+                ?? \App\Models\Patient::where('user_id', $user->id)->value('id');
             if (! $ownId) {
                 return response()->json(['data' => []]);
             }
-            $patientId = $ownId;
+            $patientId = (int) $ownId;
         }
 
-        $orders = LabOrder::with($this->withRelations())
+        $query = LabOrder::with($this->withRelations())
             ->when($patientId, fn ($q) => $q->where('patient_id', $patientId))
-            ->when($request->status, fn ($q, $status) => $q->where('status', $status))
-            ->latest()
-            ->paginate(20);
+            ->when($request->filled('status'), fn ($q) => $q->where('status', $request->status))
+            ->latest();
 
-        return response()->json($orders);
+        // Patient portal expects a simple list (not a short paginated page).
+        if ($isPatient) {
+            return response()->json([
+                'data' => $query->limit(100)->get(),
+            ]);
+        }
+
+        return response()->json($query->paginate(20));
+    }
+
+    public function show(Request $request, LabOrder $labOrder): JsonResponse
+    {
+        $user = $request->user();
+        if ($user?->hasRole(UserRole::Patient, 'patient')) {
+            $ownId = $user->patient?->id
+                ?? \App\Models\Patient::where('user_id', $user->id)->value('id');
+            if (! $ownId || (int) $labOrder->patient_id !== (int) $ownId) {
+                return response()->json(['message' => 'Forbidden'], 403);
+            }
+        }
+
+        return response()->json($labOrder->load($this->withRelations()));
     }
 
     public function store(Request $request): JsonResponse
@@ -84,11 +106,6 @@ class LabOrderController extends Controller
         });
 
         return response()->json($order->load($this->withRelations()), 201);
-    }
-
-    public function show(LabOrder $labOrder): JsonResponse
-    {
-        return response()->json($labOrder->load($this->withRelations()));
     }
 
     public function uploadReport(Request $request, LabOrder $labOrder): JsonResponse
@@ -148,6 +165,25 @@ class LabOrderController extends Controller
                 ->where('lab_order_id', $labOrder->id)
                 ->where('id', (int) $row['id'])
                 ->update(['results' => $row['results'] ?? null]);
+        }
+
+        $labOrder->load('items');
+        $hasResults = $labOrder->items->contains(function (LabOrderItem $item) {
+            if (! is_array($item->results) || $item->results === []) {
+                return false;
+            }
+
+            foreach ($item->results as $value) {
+                if (trim((string) $value) !== '') {
+                    return true;
+                }
+            }
+
+            return false;
+        });
+
+        if ($hasResults && $labOrder->status === 'ordered') {
+            $labOrder->update(['status' => 'in_progress']);
         }
 
         return response()->json($labOrder->fresh()->load($this->withRelations()));

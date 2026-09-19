@@ -10,13 +10,20 @@ use App\Models\Prescription;
 use App\Models\PrescriptionItem;
 use App\Models\VisitBill;
 use App\Models\VisitBillItem;
+use App\Services\ClinicPharmacyService;
 use App\Services\VisitBillService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
 
 class PrescriptionController extends Controller
 {
+    public function __construct(private ClinicPharmacyService $pharmacy)
+    {
+    }
+
     private function withRelations()
     {
         return [
@@ -67,25 +74,47 @@ class PrescriptionController extends Controller
             'items.*.quantity' => ['required', 'integer', 'min:1'],
         ]);
 
-        $prescription = DB::transaction(function () use ($data) {
-            $prescription = Prescription::create([
-                'patient_id' => $data['patient_id'],
-                'doctor_id' => $data['doctor_id'],
-                'queue_token_id' => $data['queue_token_id'] ?? null,
-                'worksheet_id' => $data['worksheet_id'] ?? null,
-                'notes' => $data['notes'] ?? null,
-                'status' => 'pending',
+        try {
+            $prescription = DB::transaction(function () use ($data) {
+                $prescription = Prescription::create([
+                    'patient_id' => $data['patient_id'],
+                    'doctor_id' => $data['doctor_id'],
+                    'queue_token_id' => $data['queue_token_id'] ?? null,
+                    'worksheet_id' => $data['worksheet_id'] ?? null,
+                    'notes' => $data['notes'] ?? null,
+                    'status' => 'pending',
+                ]);
+
+                foreach ($data['items'] as $item) {
+                    PrescriptionItem::create([
+                        'prescription_id' => $prescription->id,
+                        ...$item,
+                    ]);
+                }
+
+                // Push to Lamstone pharmacy so the store can bill / dispense.
+                if ($this->pharmacy->isConfigured()) {
+                    $remote = $this->pharmacy->createPrescription($prescription);
+                    $prescription->update([
+                        'clinic_prescription_id' => $remote['id'],
+                        'clinic_prescription_number' => $remote['prescription_number'] ?? null,
+                        'clinic_synced_at' => now(),
+                    ]);
+                }
+
+                return $prescription;
+            });
+        } catch (RuntimeException $e) {
+            Log::warning('Prescription pharmacy sync failed', [
+                'message' => $e->getMessage(),
+                'patient_id' => $data['patient_id'] ?? null,
+                'doctor_id' => $data['doctor_id'] ?? null,
             ]);
 
-            foreach ($data['items'] as $item) {
-                PrescriptionItem::create([
-                    'prescription_id' => $prescription->id,
-                    ...$item,
-                ]);
-            }
-
-            return $prescription;
-        });
+            return response()->json([
+                'message' => $e->getMessage() ?: 'Could not send prescription to pharmacy.',
+            ], 502);
+        }
 
         return response()->json($prescription->load($this->withRelations()), 201);
     }

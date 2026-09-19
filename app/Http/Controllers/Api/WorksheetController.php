@@ -34,7 +34,8 @@ class WorksheetController extends Controller
             ->when($data['patient_id'] ?? null, fn ($q, $id) => $q->where('patient_id', $id))
             ->when($data['status'] ?? null, fn ($q, $status) => $q->where('status', $status))
             ->when($data['date'] ?? null, fn ($q, $date) => $q->whereDate('opened_at', $date))
-            ->latest()
+            ->latest('opened_at')
+            ->latest('id')
             ->paginate(30);
 
         return response()->json($worksheets);

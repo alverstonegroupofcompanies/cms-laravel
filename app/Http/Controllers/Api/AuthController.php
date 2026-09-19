@@ -23,7 +23,7 @@ class AuthController extends Controller
     {
         $data = $request->validate([
             'email' => ['required', 'email', 'max:255'],
-            'purpose' => ['nullable', Rule::in(['register', 'login'])],
+            'purpose' => ['nullable', Rule::in(['register', 'login', 'reset_password'])],
         ]);
 
         $email = strtolower(trim($data['email']));
@@ -51,6 +51,18 @@ class AuthController extends Controller
                 return response()->json([
                     'message' => 'No account found for this email. Please register first.',
                 ], 404);
+            }
+        }
+
+        if ($purpose === 'reset_password') {
+            $user = $this->findPatientUserByEmail($email);
+            if (! $user) {
+                return response()->json([
+                    'message' => 'No patient login found for this email. Register first, or use Email OTP to sign in.',
+                ], 404);
+            }
+            if ($user->status !== 'active') {
+                return response()->json(['message' => 'Account is inactive.'], 403);
             }
         }
 
@@ -315,6 +327,49 @@ class AuthController extends Controller
         return response()->json([
             'message' => 'Password updated successfully.',
             'user' => $user->fresh()->load('patient'),
+        ]);
+    }
+
+    /**
+     * Public patient password reset: email OTP + new password (no current password).
+     */
+    public function resetPasswordWithOtp(Request $request, OtpService $otpService): JsonResponse
+    {
+        $data = $request->validate([
+            'email' => ['required', 'email', 'max:255'],
+            'code' => ['required', 'string', 'size:6'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
+
+        $email = strtolower(trim($data['email']));
+        $user = $this->findPatientUserByEmail($email);
+
+        if (! $user) {
+            return response()->json([
+                'message' => 'No patient login found for this email.',
+            ], 404);
+        }
+
+        if ($user->status !== 'active') {
+            return response()->json(['message' => 'Account is inactive.'], 403);
+        }
+
+        if (! $otpService->verify($email, $data['code'])) {
+            return response()->json(['message' => 'Invalid or expired OTP.'], 422);
+        }
+
+        $user->update([
+            'password' => $data['password'],
+            'must_reset_password' => false,
+        ]);
+
+        $token = $user->createToken('patient-token')->plainTextToken;
+
+        return response()->json([
+            'message' => 'Password updated successfully.',
+            'token' => $token,
+            'user' => $user->fresh()->load('patient'),
+            'must_reset_password' => false,
         ]);
     }
 

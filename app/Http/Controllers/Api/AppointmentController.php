@@ -9,6 +9,7 @@ use App\Models\Appointment;
 use App\Models\Doctor;
 use App\Services\QueueService;
 use App\Services\SlotGeneratorService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -150,7 +151,7 @@ class AppointmentController extends Controller
         return response()->json($appointments);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(Request $request, SlotGeneratorService $slotService): JsonResponse
     {
         $data = $request->validate([
             'patient_id' => ['required', 'exists:patients,id'],
@@ -163,6 +164,16 @@ class AppointmentController extends Controller
         ]);
 
         $doctor = Doctor::findOrFail($data['doctor_id']);
+
+        if (! $slotService->doctorWorksOnDate((int) $data['doctor_id'], $data['appointment_date'])) {
+            return response()->json(['message' => 'Doctor not available on this date.'], 422);
+        }
+
+        $openSlots = $slotService->getAvailableSlots((int) $data['doctor_id'], $data['appointment_date']);
+        $slotOk = collect($openSlots)->contains(fn (array $s) => ($s['slot_time'] ?? null) === $data['slot_time']);
+        if (! $slotOk) {
+            return response()->json(['message' => 'This slot is not available.'], 422);
+        }
 
         $exists = Appointment::where('doctor_id', $data['doctor_id'])
             ->whereDate('appointment_date', $data['appointment_date'])
@@ -186,19 +197,22 @@ class AppointmentController extends Controller
         ]);
 
         $token = null;
-        $isToday = $appointment->appointment_date->toDateString() === now()->toDateString();
+        $appointmentDate = $appointment->appointment_date->toDateString();
+        $isToday = $appointment->appointment_date->isToday();
 
-        if ($isToday) {
-            $token = app(QueueService::class)->joinQueue(
-                $appointment->patient_id,
-                $appointment->doctor_id,
-                $appointment->appointment_date->toDateString(),
-                $appointment->id
-            );
-        }
+        // Always issue the day's token at booking so the patient can see it immediately.
+        // Same-day bookings also join the live queue (checked in); future days keep status booked.
+        $token = app(QueueService::class)->joinQueue(
+            $appointment->patient_id,
+            $appointment->doctor_id,
+            $appointmentDate,
+            $appointment->id,
+            false,
+            $isToday
+        );
 
         return response()->json([
-            'appointment' => $appointment->load(['patient', 'doctor', 'clinic', 'department']),
+            'appointment' => $appointment->fresh()->load(['patient', 'doctor', 'clinic', 'department', 'queueToken']),
             'queue_token' => $token,
         ], 201);
     }
@@ -310,14 +324,17 @@ class AppointmentController extends Controller
             return response()->json(['message' => 'This slot is not available.'], 422);
         }
 
-        // Drop any active token for the old slot (same as cancel + rebook)
-        \App\Models\QueueToken::query()
+        $oldDate = $appointment->appointment_date->toDateString();
+        $newDate = Carbon::parse($data['appointment_date'])->toDateString();
+
+        $existingToken = \App\Models\QueueToken::query()
             ->where('appointment_id', $appointment->id)
             ->whereIn('status', [
                 \App\Enums\QueueTokenStatus::Waiting,
                 \App\Enums\QueueTokenStatus::InConsultation,
             ])
-            ->update(['status' => \App\Enums\QueueTokenStatus::Cancelled]);
+            ->latest('id')
+            ->first();
 
         $appointment->update([
             'appointment_date' => $data['appointment_date'],
@@ -327,19 +344,38 @@ class AppointmentController extends Controller
             'missed_notified_at' => null,
         ]);
 
+        $isToday = Carbon::parse($newDate)->isToday();
         $token = null;
-        $isToday = $data['appointment_date'] === now()->toDateString();
-        if ($isToday) {
+
+        // Same-day reschedule: keep the existing token number (only the slot time changes).
+        // Token number changes only when the visit moves to another day (or there was no token).
+        if ($newDate === $oldDate && $existingToken) {
+            if ($existingToken->status === \App\Enums\QueueTokenStatus::InConsultation) {
+                $existingToken->update([
+                    'status' => \App\Enums\QueueTokenStatus::Waiting,
+                    'called_at' => null,
+                ]);
+            }
+            if ($isToday) {
+                $appointment->update(['status' => AppointmentStatus::CheckedIn]);
+            }
+            $token = $existingToken->fresh()->load(['patient', 'doctor', 'appointment']);
+        } else {
+            if ($existingToken) {
+                $existingToken->update(['status' => \App\Enums\QueueTokenStatus::Cancelled]);
+            }
             $token = app(QueueService::class)->joinQueue(
                 $appointment->patient_id,
                 $appointment->doctor_id,
-                $data['appointment_date'],
-                $appointment->id
+                $newDate,
+                $appointment->id,
+                false,
+                $isToday
             );
         }
 
         return response()->json([
-            'appointment' => $appointment->fresh()->load(['patient', 'doctor', 'clinic', 'department']),
+            'appointment' => $appointment->fresh()->load(['patient', 'doctor', 'clinic', 'department', 'queueToken']),
             'queue_token' => $token,
         ]);
     }

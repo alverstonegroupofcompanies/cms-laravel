@@ -9,6 +9,7 @@ use App\Models\Appointment;
 use App\Models\Doctor;
 use App\Models\Patient;
 use App\Models\User;
+use App\Models\Worksheet;
 use App\Services\PatientCodeGenerator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -308,6 +309,82 @@ class PatientController extends Controller
             ->get();
 
         return response()->json($this->withVisitSummaries($patients));
+    }
+
+    /**
+     * Patients this doctor has seen before, newest visit first.
+     */
+    public function myPatients(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $doctor = $user?->doctor;
+
+        if (! $user || ! $user->hasRole(UserRole::Doctor, 'doctor') || ! $doctor) {
+            return response()->json(['message' => 'Only doctors can view their patient list.'], 403);
+        }
+
+        $doctorId = (int) $doctor->id;
+        $search = trim((string) $request->input('search', $request->input('q', '')));
+
+        $visitRows = Worksheet::query()
+            ->select('patient_id')
+            ->selectRaw('MAX(COALESCE(closed_at, opened_at, created_at)) as last_visit_at')
+            ->selectRaw('COUNT(*) as visit_count')
+            ->where('doctor_id', $doctorId)
+            ->groupBy('patient_id')
+            ->orderByDesc('last_visit_at')
+            ->get();
+
+        // Also include completed appointments that may not have a worksheet yet.
+        $appointmentRows = Appointment::query()
+            ->select('patient_id')
+            ->selectRaw("MAX(CONCAT(appointment_date, ' ', COALESCE(slot_time, '00:00:00'))) as last_visit_at")
+            ->selectRaw('COUNT(*) as visit_count')
+            ->where('doctor_id', $doctorId)
+            ->where('status', AppointmentStatus::Completed)
+            ->when($visitRows->isNotEmpty(), fn ($q) => $q->whereNotIn('patient_id', $visitRows->pluck('patient_id')))
+            ->groupBy('patient_id')
+            ->orderByDesc('last_visit_at')
+            ->get();
+
+        $merged = $visitRows
+            ->concat($appointmentRows)
+            ->unique('patient_id')
+            ->sortByDesc(fn ($row) => (string) $row->last_visit_at)
+            ->values();
+
+        if ($merged->isEmpty()) {
+            return response()->json([]);
+        }
+
+        $patients = Patient::query()
+            ->whereIn('id', $merged->pluck('patient_id'))
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($inner) use ($search) {
+                    $inner->where('phone', 'like', "%{$search}%")
+                        ->orWhere('patient_code', 'like', "%{$search}%")
+                        ->orWhere('name', 'like', "%{$search}%")
+                        ->orWhere('email', 'like', "%{$search}%");
+                });
+            })
+            ->get()
+            ->keyBy('id');
+
+        $ordered = $merged
+            ->map(function ($row) use ($patients) {
+                $patient = $patients->get($row->patient_id);
+                if (! $patient) {
+                    return null;
+                }
+                $patient->setAttribute('visit_count', (int) $row->visit_count);
+                $patient->setAttribute('last_visit_at', $row->last_visit_at);
+
+                return $patient;
+            })
+            ->filter()
+            ->values();
+
+        return response()->json($this->withVisitSummaries($ordered));
     }
 
     /**

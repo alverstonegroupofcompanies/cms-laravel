@@ -17,7 +17,7 @@ return new class extends Migration
         $clinic = Clinic::create([
             'name' => 'Alverstone Medcity',
             'code' => 'AMC-MAIN',
-            'address' => 'Technopark, Trivandrum',
+            'address' => 'Chandanathope, Kollam, Kerala 691014',
             'is_active' => true,
         ]);
 

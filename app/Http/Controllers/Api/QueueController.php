@@ -18,11 +18,15 @@ class QueueController extends Controller
             'date' => ['nullable', 'date'],
         ]);
 
-        $token = $queueService->joinQueue(
-            (int) $data['patient_id'],
-            (int) $data['doctor_id'],
-            $data['date'] ?? null
-        );
+        try {
+            $token = $queueService->joinQueue(
+                (int) $data['patient_id'],
+                (int) $data['doctor_id'],
+                $data['date'] ?? null
+            );
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
 
         $position = $queueService->getMyPosition(
             (int) $data['patient_id'],

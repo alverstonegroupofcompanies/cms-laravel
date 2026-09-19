@@ -16,7 +16,18 @@ class Prescription extends Model
         'worksheet_id',
         'notes',
         'status',
+        'clinic_prescription_id',
+        'clinic_prescription_number',
+        'clinic_synced_at',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'clinic_prescription_id' => 'integer',
+            'clinic_synced_at' => 'datetime',
+        ];
+    }
 
     public function patient(): BelongsTo
     {

@@ -53,7 +53,7 @@ class DatabaseSeeder extends Seeder
             ['email' => 'pharmacy@clinic.com'],
             [
                 'name' => 'Pharmacy Staff',
-                'phone' => '9999999997',
+                'phone' => '9999999995',
                 'password' => $password,
                 'role' => UserRole::Pharmacy,
                 'status' => 'active',
@@ -75,7 +75,7 @@ class DatabaseSeeder extends Seeder
             ['code' => 'AMC-MAIN'],
             [
                 'name' => 'Alverstone Medcity',
-                'address' => 'Technopark, Trivandrum',
+                'address' => 'Chandanathope, Kollam, Kerala 691014',
                 'is_active' => true,
             ]
         );
