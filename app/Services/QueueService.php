@@ -785,4 +785,168 @@ class QueueService
             })
             ->values();
     }
+
+    /**
+     * TV screen display data: active doctors with their current token being served
+     * and upcoming queue tokens, formatted for horizontal / vertical public displays.
+     *
+     * @return array{
+     *   clinic: array<string, mixed>,
+     *   date: string,
+     *   server_time: string,
+     *   doctors: array<int, array<string, mixed>>,
+     *   latest_call: ?array<string, mixed>
+     * }
+     */
+    public function getTvDisplayStatus(?int $doctorId = null, ?string $date = null): array
+    {
+        $queueDate = $date ?? now()->toDateString();
+        $now = Carbon::now();
+
+        $clinic = \App\Models\Clinic::first();
+        $clinicData = [
+            'name' => $clinic?->name ?? 'Technopark Healthcare Clinic',
+            'code' => $clinic?->code ?? 'AMC',
+            'address' => $clinic?->address ?? '',
+        ];
+
+        $doctorsQuery = \App\Models\Doctor::with(['department', 'clinic'])
+            ->where('status', \App\Enums\DoctorStatus::Active);
+
+        if ($doctorId) {
+            $doctorsQuery->where('id', $doctorId);
+        }
+
+        $doctors = $doctorsQuery->orderBy('name')->get();
+
+        $doctorsList = [];
+        $latestCall = null;
+        $latestCallTimestamp = null;
+
+        foreach ($doctors as $doctor) {
+            $allTokens = $this->getOrderedQueue($doctor->id, $queueDate);
+
+            // Tokens in consultation
+            $currentTokenModel = $allTokens->first(fn (QueueToken $t) => $t->status === QueueTokenStatus::InConsultation);
+
+            // Completed count today
+            $completedCount = QueueToken::where('doctor_id', $doctor->id)
+                ->whereDate('queue_date', $queueDate)
+                ->where('status', QueueTokenStatus::Completed)
+                ->count();
+
+            // Waiting tokens
+            $waitingTokens = $allTokens->filter(fn (QueueToken $t) => $t->status === QueueTokenStatus::Waiting)->values();
+
+            $currentToken = null;
+            if ($currentTokenModel) {
+                $elapsed = $currentTokenModel->called_at
+                    ? max(0, $currentTokenModel->called_at->diffInMinutes($now))
+                    : 0;
+
+                $patientName = $currentTokenModel->patient?->name ?? 'Patient';
+                $nameParts = explode(' ', trim($patientName));
+                $shortName = count($nameParts) > 1
+                    ? $nameParts[0] . ' ' . strtoupper(substr($nameParts[count($nameParts) - 1], 0, 1)) . '.'
+                    : $patientName;
+
+                $currentToken = [
+                    'id' => $currentTokenModel->id,
+                    'token_number' => $currentTokenModel->token_number,
+                    'display_code' => $currentTokenModel->display_code,
+                    'patient_name' => $shortName,
+                    'patient_full_name' => $patientName,
+                    'patient_code' => $currentTokenModel->patient?->patient_code,
+                    'called_at' => $currentTokenModel->called_at?->toIso8601String(),
+                    'elapsed_minutes' => $elapsed,
+                    'status' => 'in_consultation',
+                ];
+
+                if ($currentTokenModel->called_at) {
+                    $ts = $currentTokenModel->called_at->getTimestamp();
+                    if ($latestCallTimestamp === null || $ts > $latestCallTimestamp) {
+                        $latestCallTimestamp = $ts;
+                        $latestCall = [
+                            'token_id' => $currentTokenModel->id,
+                            'token_code' => $currentTokenModel->display_code,
+                            'doctor_id' => $doctor->id,
+                            'doctor_name' => $doctor->name,
+                            'room_number' => $doctor->room_number,
+                            'patient_name' => $shortName,
+                            'called_at' => $currentTokenModel->called_at->toIso8601String(),
+                        ];
+                    }
+                }
+            }
+
+            $upcomingList = [];
+            foreach ($waitingTokens->take(8) as $idx => $waitingToken) {
+                $pName = $waitingToken->patient?->name ?? 'Patient';
+                $pParts = explode(' ', trim($pName));
+                $sName = count($pParts) > 1
+                    ? $pParts[0] . ' ' . strtoupper(substr($pParts[count($pParts) - 1], 0, 1)) . '.'
+                    : $pName;
+
+                $slotTime = $waitingToken->appointment?->slot_time
+                    ? Carbon::parse($waitingToken->appointment->slot_time)->format('h:i A')
+                    : null;
+
+                $upcomingList[] = [
+                    'id' => $waitingToken->id,
+                    'token_number' => $waitingToken->token_number,
+                    'display_code' => $waitingToken->display_code,
+                    'patient_name' => $sName,
+                    'position' => $idx + 1,
+                    'slot_time' => $slotTime,
+                    'waiting_minutes' => $waitingToken->created_at ? max(0, $waitingToken->created_at->diffInMinutes($now)) : 0,
+                ];
+            }
+
+            // Doctor status indicator
+            $statusLabel = 'available';
+            if ($currentToken) {
+                $statusLabel = 'in_consultation';
+            } elseif ($waitingTokens->count() > 0) {
+                $statusLabel = 'calling_next';
+            }
+
+            $doctorsList[] = [
+                'id' => $doctor->id,
+                'name' => $doctor->name,
+                'specialization' => $doctor->specialization,
+                'room_number' => $doctor->room_number,
+                'department' => $doctor->department ? [
+                    'id' => $doctor->department->id,
+                    'name' => $doctor->department->name,
+                ] : null,
+                'photo_url' => $doctor->photo_url,
+                'status' => $statusLabel,
+                'current_token' => $currentToken,
+                'waiting_tokens' => $upcomingList,
+                'waiting_count' => $waitingTokens->count(),
+                'completed_count' => $completedCount,
+                'total_today' => ($currentToken ? 1 : 0) + $waitingTokens->count() + $completedCount,
+            ];
+        }
+
+        // Prioritize doctors with active consultations and busy waiting lines first
+        usort($doctorsList, function (array $a, array $b) {
+            $aPriority = ($a['current_token'] ? 20 : 0) + min(10, $a['waiting_count']);
+            $bPriority = ($b['current_token'] ? 20 : 0) + min(10, $b['waiting_count']);
+
+            if ($aPriority !== $bPriority) {
+                return $bPriority <=> $aPriority;
+            }
+
+            return strcmp((string) $a['name'], (string) $b['name']);
+        });
+
+        return [
+            'clinic' => $clinicData,
+            'date' => $queueDate,
+            'server_time' => $now->toIso8601String(),
+            'doctors' => $doctorsList,
+            'latest_call' => $latestCall,
+        ];
+    }
 }

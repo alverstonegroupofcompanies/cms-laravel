@@ -18,6 +18,7 @@ class Doctor extends Model
         'department_id',
         'name',
         'specialization',
+        'room_number',
         'phone',
         'phone_secondary',
         'email',
@@ -27,6 +28,11 @@ class Doctor extends Model
         'lunch_start',
         'lunch_end',
     ];
+
+    public function getRoomNumberAttribute(?string $value): string
+    {
+        return $value ?: ('OPD ' . ($this->id ?: 1));
+    }
 
     protected function casts(): array
     {

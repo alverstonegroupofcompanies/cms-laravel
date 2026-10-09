@@ -35,6 +35,7 @@ Route::get('/doctors/{doctor}/availability', [DoctorController::class, 'getAvail
 Route::get('/doctors/{doctor}/available-dates', [DoctorController::class, 'availableDates']);
 Route::get('/appointments/slots', [AppointmentController::class, 'slots']);
 Route::get('/queue/status', [QueueController::class, 'status']);
+Route::get('/queue/tv-display', [QueueController::class, 'tvDisplay']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/auth/me', [AuthController::class, 'me']);

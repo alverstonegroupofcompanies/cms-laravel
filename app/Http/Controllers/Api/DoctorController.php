@@ -60,6 +60,7 @@ class DoctorController extends Controller
                 'department_id' => $data['department_id'] ?? null,
                 'name' => $data['name'],
                 'specialization' => $data['specialization'],
+                'room_number' => $data['room_number'] ?? null,
                 'phone' => $data['phone'],
                 'phone_secondary' => $data['phone_secondary'] ?? null,
                 'email' => $data['email'],
@@ -97,6 +98,7 @@ class DoctorController extends Controller
                 'department_id' => array_key_exists('department_id', $data) ? $data['department_id'] : $doctor->department_id,
                 'name' => $data['name'],
                 'specialization' => $data['specialization'],
+                'room_number' => array_key_exists('room_number', $data) ? $data['room_number'] : $doctor->room_number,
                 'phone' => $data['phone'],
                 'phone_secondary' => array_key_exists('phone_secondary', $data)
                     ? ($data['phone_secondary'] ?: null)
@@ -234,6 +236,7 @@ class DoctorController extends Controller
         return $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'specialization' => ['required', 'string', 'max:255'],
+            'room_number' => ['nullable', 'string', 'max:50'],
             'phone' => ['required', 'string', 'max:20'],
             'phone_secondary' => ['nullable', 'string', 'max:20'],
             'email' => [

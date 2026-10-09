@@ -91,6 +91,19 @@ class QueueController extends Controller
         ]);
     }
 
+    public function tvDisplay(Request $request, QueueService $queueService): JsonResponse
+    {
+        $data = $request->validate([
+            'doctor_id' => ['nullable', 'exists:doctors,id'],
+            'date' => ['nullable', 'date'],
+        ]);
+
+        $doctorId = isset($data['doctor_id']) ? (int) $data['doctor_id'] : null;
+        $date = $data['date'] ?? null;
+
+        return response()->json($queueService->getTvDisplayStatus($doctorId, $date));
+    }
+
     public function myPosition(Request $request, QueueService $queueService): JsonResponse
     {
         $user = $request->user();
