@@ -25,7 +25,7 @@ class Appointment extends Model
     protected function casts(): array
     {
         return [
-            'appointment_date' => 'date',
+            'appointment_date' => 'date:Y-m-d',
             'status' => AppointmentStatus::class,
             'reminder_sent_at' => 'datetime',
             'missed_notified_at' => 'datetime',

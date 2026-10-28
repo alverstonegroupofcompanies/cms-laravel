@@ -33,25 +33,30 @@ class QueueService
             }
         }
 
-        if (! $endOfLine) {
+        if ($appointmentId) {
+            $existing = QueueToken::where('appointment_id', $appointmentId)
+                ->whereDate('queue_date', $queueDate)
+                ->whereNotIn('status', [QueueTokenStatus::Cancelled])
+                ->first();
+
+            if ($existing) {
+                if ($checkIn && $existing->status === QueueTokenStatus::Waiting) {
+                    Appointment::where('id', $appointmentId)
+                        ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
+                        ->update(['status' => AppointmentStatus::CheckedIn]);
+                }
+
+                return $existing->fresh()->load(['patient', 'doctor', 'appointment']);
+            }
+        } elseif (! $endOfLine) {
             $existing = QueueToken::where('patient_id', $patientId)
                 ->where('doctor_id', $doctorId)
+                ->whereNull('appointment_id')
                 ->whereDate('queue_date', $queueDate)
                 ->whereIn('status', [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation])
                 ->first();
 
             if ($existing) {
-                if ($appointmentId) {
-                    if (! $existing->appointment_id) {
-                        $existing->update(['appointment_id' => $appointmentId]);
-                    }
-                    if ($checkIn) {
-                        Appointment::where('id', $appointmentId)
-                            ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::NoShow])
-                            ->update(['status' => AppointmentStatus::CheckedIn]);
-                    }
-                }
-
                 return $existing->fresh()->load(['patient', 'doctor', 'appointment']);
             }
         }
@@ -376,15 +381,7 @@ class QueueService
         if ($isLate || $wasMissed) {
             return DB::transaction(function () use ($appointment, $date) {
                 QueueToken::query()
-                    ->where(function ($q) use ($appointment, $date) {
-                        $q->where('appointment_id', $appointment->id)
-                            ->orWhere(function ($q2) use ($appointment, $date) {
-                                $q2->where('patient_id', $appointment->patient_id)
-                                    ->where('doctor_id', $appointment->doctor_id)
-                                    ->whereDate('queue_date', $date)
-                                    ->whereIn('status', [QueueTokenStatus::Waiting, QueueTokenStatus::InConsultation]);
-                            });
-                    })
+                    ->where('appointment_id', $appointment->id)
                     ->whereIn('status', [QueueTokenStatus::Waiting])
                     ->update(['status' => QueueTokenStatus::Cancelled]);
 
@@ -403,24 +400,13 @@ class QueueService
         }
 
         $existing = QueueToken::query()
-            ->where(function ($q) use ($appointment, $date) {
-                $q->where('appointment_id', $appointment->id)
-                    ->orWhere(function ($q2) use ($appointment, $date) {
-                        $q2->where('patient_id', $appointment->patient_id)
-                            ->where('doctor_id', $appointment->doctor_id)
-                            ->whereDate('queue_date', $date)
-                            ->whereNotIn('status', [QueueTokenStatus::Cancelled]);
-                    });
-            })
+            ->where('appointment_id', $appointment->id)
+            ->whereNotIn('status', [QueueTokenStatus::Cancelled])
             ->first();
 
         $appointment->update(['status' => AppointmentStatus::CheckedIn]);
 
         if ($existing) {
-            if (! $existing->appointment_id) {
-                $existing->update(['appointment_id' => $appointment->id]);
-            }
-
             return $existing->fresh()->load(['patient', 'doctor', 'appointment']);
         }
 

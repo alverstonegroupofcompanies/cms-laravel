@@ -281,15 +281,29 @@ class AppointmentController extends Controller
 
     public function cancel(Appointment $appointment): JsonResponse
     {
-        $appointment->update(['status' => AppointmentStatus::Cancelled]);
+        $matchingIds = Appointment::query()
+            ->where('patient_id', $appointment->patient_id)
+            ->where('doctor_id', $appointment->doctor_id)
+            ->whereDate('appointment_date', $appointment->appointment_date)
+            ->where('slot_time', $appointment->slot_time)
+            ->whereNotIn('status', [AppointmentStatus::Completed->value, AppointmentStatus::Cancelled->value])
+            ->pluck('id')
+            ->push($appointment->id)
+            ->unique()
+            ->values()
+            ->all();
+
+        Appointment::query()
+            ->whereIn('id', $matchingIds)
+            ->update(['status' => AppointmentStatus::Cancelled->value]);
 
         \App\Models\QueueToken::query()
-            ->where('appointment_id', $appointment->id)
+            ->whereIn('appointment_id', $matchingIds)
             ->whereIn('status', [
-                \App\Enums\QueueTokenStatus::Waiting,
-                \App\Enums\QueueTokenStatus::InConsultation,
+                \App\Enums\QueueTokenStatus::Waiting->value,
+                \App\Enums\QueueTokenStatus::InConsultation->value,
             ])
-            ->update(['status' => \App\Enums\QueueTokenStatus::Cancelled]);
+            ->update(['status' => \App\Enums\QueueTokenStatus::Cancelled->value]);
 
         return response()->json($appointment->fresh());
     }

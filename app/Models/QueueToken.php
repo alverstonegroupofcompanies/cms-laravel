@@ -25,7 +25,7 @@ class QueueToken extends Model
     protected function casts(): array
     {
         return [
-            'queue_date' => 'date',
+            'queue_date' => 'date:Y-m-d',
             'status' => QueueTokenStatus::class,
             'end_of_line' => 'boolean',
             'called_at' => 'datetime',

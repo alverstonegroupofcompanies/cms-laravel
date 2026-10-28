@@ -11,7 +11,7 @@ class DoctorLeave extends Model
 
     protected function casts(): array
     {
-        return ['leave_date' => 'date'];
+        return ['leave_date' => 'date:Y-m-d'];
     }
 
     public function doctor(): BelongsTo

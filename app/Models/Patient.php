@@ -47,7 +47,7 @@ class Patient extends Model
     protected function casts(): array
     {
         return [
-            'dob' => 'date',
+            'dob' => 'date:Y-m-d',
             'taking_medications' => 'boolean',
         ];
     }
