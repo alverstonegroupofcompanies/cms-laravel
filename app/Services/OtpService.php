@@ -28,23 +28,42 @@ class OtpService
         $mailSent = false;
 
         if ($skipMail) {
-            Log::info("OTP for {$email}: {$code} (mail skipped)");
+            try {
+                Log::info("OTP for {$email}: {$code} (mail skipped)");
+            } catch (\Throwable) {
+                // Ignore logger misconfiguration
+            }
         } else {
             try {
                 Mail::to($email)->send(new OtpMail($code));
                 $mailSent = true;
-                Log::info("OTP mailed to {$email}");
             } catch (\Throwable $e) {
-                Log::error('OTP mail failed', [
-                    'email' => $email,
-                    'error' => $e->getMessage(),
-                ]);
+                try {
+                    Log::error('OTP mail failed', [
+                        'email' => $email,
+                        'error' => $e->getMessage(),
+                    ]);
+                } catch (\Throwable) {
+                    // Ignore logger misconfiguration
+                }
 
                 // Keep the code usable in local/dev so registration is not blocked by SMTP.
                 if (app()->environment('local', 'testing')) {
-                    Log::info("OTP for {$email}: {$code} (mail failed; use this code)");
+                    try {
+                        Log::info("OTP for {$email}: {$code} (mail failed; use this code)");
+                    } catch (\Throwable) {
+                        // Ignore logger misconfiguration
+                    }
                 } else {
                     throw new \RuntimeException('Failed to send OTP email. Please try again later.');
+                }
+            }
+
+            if ($mailSent) {
+                try {
+                    Log::info("OTP mailed to {$email}");
+                } catch (\Throwable) {
+                    // Ignore logger misconfiguration so a sent email never fails
                 }
             }
         }
