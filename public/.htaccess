@@ -23,12 +23,3 @@
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteRule ^ index.php [L]
 </IfModule>
-
-# CORS for frontend site (Hostinger)
-<IfModule mod_headers.c>
-    SetEnvIf Origin "^https://[a-z0-9-]+\.hostingersite\.com$" ALLOWED_ORIGIN=$0
-    Header always set Access-Control-Allow-Origin "%{ALLOWED_ORIGIN}e" env=ALLOWED_ORIGIN
-    Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    Header always set Access-Control-Allow-Headers "Authorization, Content-Type, Accept, X-Requested-With, X-XSRF-TOKEN"
-    Header always set Access-Control-Max-Age "86400"
-</IfModule>
