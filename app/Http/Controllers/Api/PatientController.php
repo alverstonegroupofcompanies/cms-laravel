@@ -230,6 +230,28 @@ class PatientController extends Controller
         return response()->json($patient);
     }
 
+    public function royalPoints(Request $request, \App\Services\RoyalPointsService $pointsService): JsonResponse
+    {
+        $patient = $request->user()->patient;
+        if (! $patient) {
+            return response()->json(['message' => 'Patient profile not found.'], 404);
+        }
+
+        $history = $patient->royalPointTransactions()
+            ->with('visitBill:id,bill_code,grand_total,created_at')
+            ->latest()
+            ->take(30)
+            ->get();
+
+        return response()->json([
+            'points' => (int) $patient->royal_points,
+            'value_inr' => $pointsService->pointsToRupees((int) $patient->royal_points),
+            'conversion_rate' => '4 points = ₹1',
+            'earn_rate' => '4 points per ₹100 spent',
+            'transactions' => $history,
+        ]);
+    }
+
     public function updateMe(Request $request): JsonResponse
     {
         $user = $request->user();

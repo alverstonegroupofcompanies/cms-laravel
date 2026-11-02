@@ -608,8 +608,12 @@ class QueueService
     {
         $token = QueueToken::findOrFail($tokenId);
 
-        if ($token->status !== QueueTokenStatus::InConsultation) {
-            throw new \InvalidArgumentException('Only patients with the doctor can be checked out.');
+        if ($token->status === QueueTokenStatus::Completed) {
+            return $token->load(['patient', 'doctor', 'worksheet']);
+        }
+
+        if (! in_array($token->status, [QueueTokenStatus::InConsultation, QueueTokenStatus::Waiting], true)) {
+            throw new \InvalidArgumentException('Only active queue tokens can be checked out.');
         }
 
         return $this->complete($tokenId);
@@ -628,6 +632,12 @@ class QueueService
             Appointment::where('id', $token->appointment_id)
                 ->update(['status' => AppointmentStatus::Completed]);
         }
+
+        Appointment::where('patient_id', $token->patient_id)
+            ->where('doctor_id', $token->doctor_id)
+            ->whereDate('appointment_date', $token->queue_date)
+            ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::CheckedIn])
+            ->update(['status' => AppointmentStatus::Completed]);
 
         $this->closeWorksheetForToken($token->id);
 
@@ -654,6 +664,12 @@ class QueueService
                 Appointment::where('id', $token->appointment_id)
                     ->update(['status' => AppointmentStatus::Completed]);
             }
+
+            Appointment::where('patient_id', $token->patient_id)
+                ->where('doctor_id', $token->doctor_id)
+                ->whereDate('appointment_date', $token->queue_date)
+                ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::CheckedIn])
+                ->update(['status' => AppointmentStatus::Completed]);
 
             $this->closeWorksheetForToken($token->id);
         }

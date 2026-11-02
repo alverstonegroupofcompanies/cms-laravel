@@ -12,7 +12,7 @@ class Patient extends Model
 {
     use SoftDeletes;
 
-    protected $appends = ['photo_url'];
+    protected $appends = ['photo_url', 'royal_points_value'];
 
     protected $fillable = [
         'user_id',
@@ -42,6 +42,7 @@ class Patient extends Model
         'emergency_contact_last_name',
         'emergency_contact_relationship',
         'emergency_contact_phone',
+        'royal_points',
     ];
 
     protected function casts(): array
@@ -49,7 +50,14 @@ class Patient extends Model
         return [
             'dob' => 'date:Y-m-d',
             'taking_medications' => 'boolean',
+            'royal_points' => 'integer',
         ];
+    }
+
+    public function getRoyalPointsValueAttribute(): float
+    {
+        // 4 points = 1 rupee
+        return round(($this->royal_points ?? 0) / 4, 2);
     }
 
     public function getPhotoUrlAttribute(): ?string
@@ -89,5 +97,10 @@ class Patient extends Model
     public function worksheets(): HasMany
     {
         return $this->hasMany(Worksheet::class);
+    }
+
+    public function royalPointTransactions(): HasMany
+    {
+        return $this->hasMany(RoyalPointTransaction::class);
     }
 }

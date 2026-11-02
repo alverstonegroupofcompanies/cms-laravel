@@ -112,6 +112,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/visit-bills/{visitBill}/lab-items', [VisitBillController::class, 'updateLabItems']);
     Route::post('/visit-bills/{visitBill}/pharmacy-done', [VisitBillController::class, 'markPharmacyDone']);
     Route::post('/visit-bills/{visitBill}/lab-done', [VisitBillController::class, 'markLabDone']);
+    Route::post('/visit-bills/{visitBill}/redeem-points', [VisitBillController::class, 'redeemPoints']);
+    Route::get('/patient/royal-points', [PatientController::class, 'royalPoints']);
     Route::get('/pharmacy/sales', [PharmacySalesController::class, 'index']);
 
     Route::get('/staff', [StaffController::class, 'index']);

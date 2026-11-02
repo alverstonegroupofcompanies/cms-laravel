@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class VisitBill extends Model
 {
+    protected $appends = ['payable_amount'];
+
     protected $fillable = [
         'bill_code',
         'worksheet_id',
@@ -18,6 +20,9 @@ class VisitBill extends Model
         'pharmacy_subtotal',
         'lab_subtotal',
         'grand_total',
+        'points_earned',
+        'points_redeemed',
+        'points_discount',
         'status',
         'pharmacy_status',
         'lab_status',
@@ -30,7 +35,16 @@ class VisitBill extends Model
             'pharmacy_subtotal' => 'float',
             'lab_subtotal' => 'float',
             'grand_total' => 'float',
+            'points_earned' => 'integer',
+            'points_redeemed' => 'integer',
+            'points_discount' => 'float',
         ];
+    }
+
+    public function getPayableAmountAttribute(): float
+    {
+        $net = (float) $this->grand_total - (float) ($this->points_discount ?? 0);
+        return max(0.0, round($net, 2));
     }
 
     public function items(): HasMany
@@ -56,5 +70,10 @@ class VisitBill extends Model
     public function queueToken(): BelongsTo
     {
         return $this->belongsTo(QueueToken::class);
+    }
+
+    public function royalPointTransactions(): HasMany
+    {
+        return $this->hasMany(RoyalPointTransaction::class);
     }
 }

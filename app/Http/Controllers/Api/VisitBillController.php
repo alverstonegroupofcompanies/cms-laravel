@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\VisitBill;
+use App\Services\RoyalPointsService;
 use App\Services\VisitBillService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -73,5 +74,16 @@ class VisitBillController extends Controller
         ]);
 
         return response()->json($service->updateLabItems($visitBill, $data['items']));
+    }
+
+    public function redeemPoints(Request $request, VisitBill $visitBill, RoyalPointsService $pointsService): JsonResponse
+    {
+        $data = $request->validate([
+            'points' => ['required', 'integer', 'min:0'],
+        ]);
+
+        $updated = $pointsService->applyRedemption($visitBill, (int) $data['points']);
+
+        return response()->json($updated);
     }
 }

@@ -95,9 +95,15 @@ class VisitBillService
                 ? 'pending'
                 : 'none';
 
+            // Use doctor's worksheet code as the primary bill_code so Lab and Pharmacy match Doctor
+            $billCode = $worksheet->worksheet_code;
+            if (! $billCode || VisitBill::where('bill_code', $billCode)->exists()) {
+                $billCode = $this->nextBillCode();
+            }
+
             // Still create a bill even with only consult / empty so doctor can reopen visit summary.
             $bill = VisitBill::create([
-                'bill_code' => $this->nextBillCode(),
+                'bill_code' => $billCode,
                 'worksheet_id' => $worksheet->id,
                 'patient_id' => $worksheet->patient_id,
                 'doctor_id' => $worksheet->doctor_id,
@@ -105,7 +111,7 @@ class VisitBillService
                 'consultation_fee' => $consultationFee,
                 'pharmacy_subtotal' => $pharmacySubtotal,
                 'lab_subtotal' => $labSubtotal,
-                'grand_total' => $consultationFee + $pharmacySubtotal + $labSubtotal,
+                'grand_total' => $consultationFee + $labSubtotal,
                 'status' => ($pharmacyStatus === 'none' && $labStatus === 'none') ? 'completed' : 'open',
                 'pharmacy_status' => $pharmacyStatus,
                 'lab_status' => $labStatus,
@@ -113,6 +119,10 @@ class VisitBillService
 
             foreach ($items as $row) {
                 $bill->items()->create($row);
+            }
+
+            if ($bill->status === 'completed') {
+                app(RoyalPointsService::class)->creditEarnedPointsOnCompletion($bill);
             }
 
             return $bill->load(['items', 'patient', 'doctor', 'worksheet', 'queueToken']);
@@ -156,6 +166,10 @@ class VisitBillService
         }
 
         $bill->save();
+
+        if ($bill->status === 'completed') {
+            app(RoyalPointsService::class)->creditEarnedPointsOnCompletion($bill);
+        }
 
         return $bill->fresh()->load(['items', 'patient', 'doctor', 'worksheet', 'queueToken']);
     }
@@ -342,7 +356,7 @@ class VisitBillService
         $bill->update([
             'pharmacy_subtotal' => $pharmacy,
             'lab_subtotal' => $lab,
-            'grand_total' => $fee + $pharmacy + $lab,
+            'grand_total' => $fee + $lab,
         ]);
 
         return $bill->fresh();
