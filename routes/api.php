@@ -46,7 +46,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/appointments/calendar', [AppointmentController::class, 'calendar']);
 
     Route::get('/patients/me', [PatientController::class, 'me']);
-    Route::patch('/patients/me', [PatientController::class, 'updateMe']);
+    Route::match(['patch', 'post'], '/patients/me', [PatientController::class, 'updateMe']);
     Route::get('/patients/my-patients', [PatientController::class, 'myPatients']);
     Route::post('/patients/{patient}/issue-login', [PatientController::class, 'issueLogin']);
     Route::get('/patients/search', [PatientController::class, 'search']);

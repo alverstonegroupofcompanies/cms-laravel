@@ -104,12 +104,24 @@ class PatientController extends Controller
             'emergency_contact_first_name' => ['nullable', 'string', 'max:100'],
             'emergency_contact_last_name' => ['nullable', 'string', 'max:100'],
             'emergency_contact_relationship' => ['nullable', 'string', 'max:100'],
+            'remove_photo' => ['nullable'],
             'photo' => ['nullable', 'image', 'max:5120'],
         ]);
 
         $fullName = trim($data['first_name'].' '.($data['last_name'] ?? ''));
         $email = ! empty($data['email']) ? strtolower(trim($data['email'])) : null;
-        $photoPath = $this->storePhoto($request) ?? $patient->photo_path;
+        $photoPath = $patient->photo_path;
+        if ($request->boolean('remove_photo')) {
+            if ($patient->photo_path) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($patient->photo_path);
+            }
+            $photoPath = null;
+        } elseif ($request->hasFile('photo')) {
+            if ($patient->photo_path) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($patient->photo_path);
+            }
+            $photoPath = $this->storePhoto($request);
+        }
 
         $patient->update([
             'name' => $fullName,
@@ -262,53 +274,85 @@ class PatientController extends Controller
         }
 
         $data = $request->validate([
-            'first_name' => ['required', 'string', 'max:100'],
-            'last_name' => ['nullable', 'string', 'max:100'],
-            'dob' => ['nullable', 'date', 'before:today'],
-            'gender' => ['nullable', Rule::in(['male', 'female', 'other'])],
-            'phone' => ['required', 'string', 'max:20', Rule::unique('patients', 'phone')->ignore($patient->id), Rule::unique('users', 'phone')->ignore($user->id)],
-            'address' => ['nullable', 'string'],
-            'blood_group' => ['nullable', Rule::in(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'])],
-            'emergency_contact' => ['nullable', 'string', 'max:255'],
-            'address_street' => ['nullable', 'string', 'max:255'],
-            'address_line2' => ['nullable', 'string', 'max:255'],
-            'city' => ['nullable', 'string', 'max:100'],
-            'state' => ['nullable', 'string', 'max:100'],
-            'postal_code' => ['nullable', 'string', 'max:20'],
-            'marital_status' => ['nullable', Rule::in(['single', 'married', 'divorced', 'widowed', 'prefer_not_to_say'])],
-            'symptoms' => ['nullable', 'string'],
-            'taking_medications' => ['nullable', 'boolean'],
-            'current_medications' => ['nullable', 'string'],
-            'emergency_contact_first_name' => ['nullable', 'string', 'max:100'],
-            'emergency_contact_last_name' => ['nullable', 'string', 'max:100'],
-            'emergency_contact_relationship' => ['nullable', 'string', 'max:100'],
-            'emergency_contact_phone' => ['nullable', 'string', 'max:20'],
+            'first_name' => ['sometimes', 'required', 'string', 'max:100'],
+            'last_name' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'dob' => ['sometimes', 'nullable', 'date', 'before:today'],
+            'gender' => ['sometimes', 'nullable', Rule::in(['male', 'female', 'other'])],
+            'phone' => ['sometimes', 'required', 'string', 'max:20', Rule::unique('patients', 'phone')->ignore($patient->id), Rule::unique('users', 'phone')->ignore($user->id)],
+            'address' => ['sometimes', 'nullable', 'string'],
+            'blood_group' => ['sometimes', 'nullable', Rule::in(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'])],
+            'emergency_contact' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'address_street' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'address_line2' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'city' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'state' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'postal_code' => ['sometimes', 'nullable', 'string', 'max:20'],
+            'marital_status' => ['sometimes', 'nullable', Rule::in(['single', 'married', 'divorced', 'widowed', 'prefer_not_to_say'])],
+            'symptoms' => ['sometimes', 'nullable', 'string'],
+            'taking_medications' => ['sometimes', 'nullable', 'boolean'],
+            'current_medications' => ['sometimes', 'nullable', 'string'],
+            'emergency_contact_first_name' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'emergency_contact_last_name' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'emergency_contact_relationship' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'emergency_contact_phone' => ['sometimes', 'nullable', 'string', 'max:20'],
+            'remove_photo' => ['nullable'],
             'photo' => ['nullable', 'image', 'max:5120'],
         ]);
 
-        $fullName = trim($data['first_name'].' '.($data['last_name'] ?? ''));
-        $fullAddress = collect([
-            $data['address_street'] ?? null,
-            $data['address_line2'] ?? null,
-            $data['city'] ?? null,
-            $data['state'] ?? null,
-            $data['postal_code'] ?? null,
-        ])->filter()->implode(', ');
+        unset($data['photo'], $data['remove_photo']);
 
-        $photoPath = $this->storePhoto($request) ?? $patient->photo_path;
+        $fullName = isset($data['first_name'])
+            ? trim($data['first_name'].' '.($data['last_name'] ?? ($patient->last_name ?? '')))
+            : $patient->name;
 
-        $patient->update([
+        $hasAddressInput = array_key_exists('address_street', $data) || array_key_exists('city', $data);
+        $fullAddress = $hasAddressInput
+            ? collect([
+                $data['address_street'] ?? null,
+                $data['address_line2'] ?? null,
+                $data['city'] ?? null,
+                $data['state'] ?? null,
+                $data['postal_code'] ?? null,
+            ])->filter()->implode(', ')
+            : ($data['address'] ?? $patient->address);
+
+        $photoPath = $patient->photo_path;
+        if ($request->boolean('remove_photo')) {
+            if ($patient->photo_path) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($patient->photo_path);
+            }
+            $photoPath = null;
+        } elseif ($request->hasFile('photo')) {
+            if ($patient->photo_path) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($patient->photo_path);
+            }
+            $photoPath = $this->storePhoto($request);
+        }
+
+        $patientUpdate = [
             ...$data,
             'name' => $fullName,
-            'last_name' => $data['last_name'] ?? null,
-            'address' => $fullAddress ?: ($data['address'] ?? $patient->address),
             'photo_path' => $photoPath,
-        ]);
+        ];
+        if (isset($data['last_name'])) {
+            $patientUpdate['last_name'] = $data['last_name'];
+        }
+        if ($hasAddressInput) {
+            $patientUpdate['address'] = $fullAddress ?: null;
+        }
 
-        $user->update([
-            'name' => $fullName,
-            'phone' => $data['phone'],
-        ]);
+        $patient->update($patientUpdate);
+
+        $userUpdate = [];
+        if (isset($data['first_name'])) {
+            $userUpdate['name'] = $fullName;
+        }
+        if (isset($data['phone'])) {
+            $userUpdate['phone'] = $data['phone'];
+        }
+        if (! empty($userUpdate)) {
+            $user->update($userUpdate);
+        }
 
         return response()->json($user->fresh()->load('patient'));
     }
