@@ -54,6 +54,6 @@ class Appointment extends Model
 
     public function queueToken(): HasOne
     {
-        return $this->hasOne(QueueToken::class);
+        return $this->hasOne(QueueToken::class)->latestOfMany();
     }
 }

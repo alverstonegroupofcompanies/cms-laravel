@@ -525,8 +525,11 @@ class QueueService
             $remaining = max(0, $consultMinutes - $activeConsult->called_at->diffInMinutes(now()));
         }
 
+        $appt = $token->appointment;
+        $isBookedOnly = $appt && $appt->status === AppointmentStatus::Booked;
+
         $estimatedWait = 0;
-        $statusLabel = $isConsulting ? 'With doctor' : 'In queue';
+        $statusLabel = $isConsulting ? 'With doctor' : ($isBookedOnly ? 'Scheduled' : 'In queue');
         if ($isConsulting) {
             $estimatedWait = $remaining;
         } elseif ($isWaiting && $position !== false) {
@@ -539,7 +542,8 @@ class QueueService
                 $estimatedWait = max(1, $remaining) + ($waitingAhead * $consultMinutes);
             } else {
                 $estimatedWait = $waitingAhead * $consultMinutes;
-                if ($waitingAhead === 0) {
+                // "Ready to enter" only applies after check-in at reception, never when just booked/not arrived
+                if ($waitingAhead === 0 && ! $isBookedOnly) {
                     $statusLabel = 'Ready to enter';
                 }
             }
