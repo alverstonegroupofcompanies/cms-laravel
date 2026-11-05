@@ -36,6 +36,13 @@ class DoctorController extends Controller
         return response()->json($query->latest()->get());
     }
 
+    public function show(Doctor $doctor): JsonResponse
+    {
+        return response()->json(
+            $doctor->load(['availability', 'clinic', 'department', 'user:id,email,must_reset_password'])
+        );
+    }
+
     public function store(Request $request): JsonResponse
     {
         $this->ensureStaff($request);

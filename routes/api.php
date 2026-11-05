@@ -31,6 +31,7 @@ Route::prefix('auth')->group(function () {
 Route::get('/clinics', [ClinicController::class, 'index']);
 Route::get('/departments', [DepartmentController::class, 'index']);
 Route::get('/doctors', [DoctorController::class, 'index']);
+Route::get('/doctors/{doctor}', [DoctorController::class, 'show']);
 Route::get('/doctors/{doctor}/availability', [DoctorController::class, 'getAvailability']);
 Route::get('/doctors/{doctor}/available-dates', [DoctorController::class, 'availableDates']);
 Route::get('/appointments/slots', [AppointmentController::class, 'slots']);
