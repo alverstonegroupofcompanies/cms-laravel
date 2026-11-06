@@ -19,16 +19,23 @@ class CreateSuperAdminCommand extends Command
         $password = $this->option('password');
         $name = $this->option('name');
 
+        $existing = User::where('email', $email)->first();
+        $phone = $existing?->phone;
+        if (!$phone) {
+            $testPhone = '9999900001';
+            $phone = User::where('phone', $testPhone)->exists() ? null : $testPhone;
+        }
+
         $user = User::updateOrCreate(
             ['email' => $email],
-            [
+            array_filter([
                 'name' => $name,
-                'phone' => '9876543210',
+                'phone' => $phone,
                 'password' => Hash::make($password),
                 'role' => UserRole::Admin,
                 'status' => 'active',
                 'must_reset_password' => false,
-            ]
+            ], fn($v) => !is_null($v))
         );
 
         // Also ensure admin@clinic.com has the same password for convenience
