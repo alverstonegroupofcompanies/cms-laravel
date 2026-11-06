@@ -118,5 +118,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/pharmacy/sales', [PharmacySalesController::class, 'index']);
 
     Route::get('/staff', [StaffController::class, 'index']);
+    Route::post('/staff', [StaffController::class, 'store']);
     Route::post('/staff/receptionist', [StaffController::class, 'storeReceptionist']);
+    Route::match(['put', 'patch'], '/staff/{user}', [StaffController::class, 'update']);
+    Route::post('/staff/{user}/reset-password', [StaffController::class, 'resetPassword']);
+    Route::delete('/staff/{user}', [StaffController::class, 'destroy']);
+    Route::post('/staff/{user}/delete', [StaffController::class, 'destroy']);
 });

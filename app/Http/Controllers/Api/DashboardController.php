@@ -20,15 +20,45 @@ class DashboardController extends Controller
     {
         $today = now()->toDateString();
 
+        $staffCounts = \App\Models\User::whereIn('role', [
+            \App\Enums\UserRole::Admin,
+            \App\Enums\UserRole::Receptionist,
+            \App\Enums\UserRole::Pharmacy,
+            \App\Enums\UserRole::Lab,
+        ])
+        ->select('role', DB::raw('count(*) as count'))
+        ->groupBy('role')
+        ->pluck('count', 'role');
+
         return response()->json([
             'total_patients' => Patient::count(),
-            'total_doctors' => Doctor::where('status', DoctorStatus::Active)->count(),
+            'total_doctors' => Doctor::count(),
+            'active_doctors' => Doctor::where('status', DoctorStatus::Active)->count(),
+            'pending_doctors' => Doctor::where('status', DoctorStatus::Pending)->count(),
+            'total_staff' => \App\Models\User::whereIn('role', [
+                \App\Enums\UserRole::Admin,
+                \App\Enums\UserRole::Receptionist,
+                \App\Enums\UserRole::Pharmacy,
+                \App\Enums\UserRole::Lab,
+            ])->count(),
+            'staff_breakdown' => [
+                'receptionist' => $staffCounts[\App\Enums\UserRole::Receptionist->value] ?? $staffCounts['receptionist'] ?? 0,
+                'pharmacy' => $staffCounts[\App\Enums\UserRole::Pharmacy->value] ?? $staffCounts['pharmacy'] ?? 0,
+                'lab' => $staffCounts[\App\Enums\UserRole::Lab->value] ?? $staffCounts['lab'] ?? 0,
+                'admin' => $staffCounts[\App\Enums\UserRole::Admin->value] ?? $staffCounts['admin'] ?? 0,
+            ],
             'today_appointments' => Appointment::whereDate('appointment_date', $today)
                 ->whereNotIn('status', [AppointmentStatus::Cancelled])
                 ->count(),
             'today_queue_length' => QueueToken::whereDate('queue_date', $today)
                 ->where('status', QueueTokenStatus::Waiting)
                 ->count(),
+            'today_completed_tokens' => QueueToken::whereDate('queue_date', $today)
+                ->where('status', QueueTokenStatus::Completed)
+                ->count(),
+            'total_medicines' => \App\Models\Medicine::count(),
+            'total_lab_tests' => \App\Models\LabTest::count(),
+            'today_lab_orders' => \App\Models\LabOrder::whereDate('created_at', $today)->count(),
         ]);
     }
 

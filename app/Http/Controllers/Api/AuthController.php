@@ -376,11 +376,17 @@ class AuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'email' => ['required', 'email'],
+            'email' => ['required', 'string'],
             'password' => ['required', 'string'],
         ]);
 
-        $user = User::where('email', $data['email'])->first();
+        $loginInput = trim($data['email']);
+        $user = User::where('email', $loginInput)
+            ->orWhere('name', $loginInput)
+            ->when(strtolower($loginInput) === 'superadmin', function ($q) {
+                $q->orWhere('email', 'superadmin@alverstone.com');
+            })
+            ->first();
 
         if (! $user || ! $user->password || ! Hash::check($data['password'], $user->password)) {
             return response()->json(['message' => 'Invalid credentials.'], 401);
@@ -425,7 +431,7 @@ class AuthController extends Controller
         }
 
         $user = match ($role) {
-            'admin' => User::where('email', 'admin@clinic.com')->first(),
+            'admin' => User::where('email', 'superadmin@alverstone.com')->orWhere('email', 'admin@clinic.com')->first(),
             'receptionist' => User::where('email', 'reception@clinic.com')->first(),
             'doctor' => User::where('email', 'doctor@clinic.com')->first(),
             'pharmacy' => User::where('email', 'pharmacy@clinic.com')->first(),
