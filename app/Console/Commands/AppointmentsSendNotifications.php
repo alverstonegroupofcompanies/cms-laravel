@@ -80,7 +80,7 @@ class AppointmentsSendNotifications extends Command
 
         Appointment::query()
             ->with(['patient.user', 'doctor', 'clinic'])
-            ->where('status', AppointmentStatus::Booked)
+            ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::CheckedIn])
             ->whereNull('missed_notified_at')
             ->where(function ($q) use ($now) {
                 $q->whereDate('appointment_date', '<', $now->toDateString())
@@ -98,7 +98,7 @@ class AppointmentsSendNotifications extends Command
                     }
 
                     $appointment->update([
-                        'status' => AppointmentStatus::NoShow,
+                        'status' => AppointmentStatus::Missed,
                         'missed_notified_at' => now(),
                     ]);
 

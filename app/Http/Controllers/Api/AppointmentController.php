@@ -117,6 +117,21 @@ class AppointmentController extends Controller
         $user = $request->user();
         $isPatient = $user?->role === UserRole::Patient;
 
+        // Auto-mark any past appointments not checked in / completed on the same day as missed
+        $today = now()->toDateString();
+        Appointment::query()
+            ->whereDate('appointment_date', '<', $today)
+            ->whereIn('status', [AppointmentStatus::Booked, AppointmentStatus::CheckedIn])
+            ->update(['status' => AppointmentStatus::Missed]);
+
+        \App\Models\QueueToken::query()
+            ->whereDate('queue_date', '<', $today)
+            ->whereIn('status', [
+                \App\Enums\QueueTokenStatus::Waiting,
+                \App\Enums\QueueTokenStatus::InConsultation,
+            ])
+            ->update(['status' => \App\Enums\QueueTokenStatus::Cancelled]);
+
         $query = Appointment::with(['patient', 'doctor', 'clinic', 'department', 'queueToken']);
 
         if ($isPatient) {
@@ -315,6 +330,7 @@ class AppointmentController extends Controller
             AppointmentStatus::Booked,
             AppointmentStatus::NoShow,
             AppointmentStatus::CheckedIn,
+            AppointmentStatus::Missed,
         ];
 
         if (! in_array($appointment->status, $reschedulable, true)) {

@@ -100,6 +100,13 @@ class PrescriptionController extends Controller
                         'clinic_prescription_number' => $remote['prescription_number'] ?? null,
                         'clinic_synced_at' => now(),
                     ]);
+                } else {
+                    $todayCount = Prescription::whereDate('created_at', today())->where('id', '<', $prescription->id)->count() + 1;
+                    $tokenNumber = str_pad((string) $todayCount, 2, '0', STR_PAD_LEFT);
+                    $prescription->update([
+                        'clinic_prescription_number' => $tokenNumber,
+                        'clinic_synced_at' => now(),
+                    ]);
                 }
 
                 return $prescription;

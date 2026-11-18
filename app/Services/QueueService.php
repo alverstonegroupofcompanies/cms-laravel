@@ -63,12 +63,11 @@ class QueueService
 
         return DB::transaction(function () use ($patientId, $doctorId, $queueDate, $appointmentId, $endOfLine, $checkIn) {
             // Clinic-wide daily sequence: AMC01, AMC02... resets each day; unique per date.
-            $lastToken = QueueToken::whereDate('queue_date', $queueDate)
+            $maxTokenNumber = (int) QueueToken::whereDate('queue_date', $queueDate)
                 ->lockForUpdate()
-                ->orderByDesc('token_number')
-                ->first();
+                ->max('token_number');
 
-            $tokenNumber = ($lastToken?->token_number ?? 0) + 1;
+            $tokenNumber = $maxTokenNumber + 1;
             $displayCode = 'AMC'.str_pad((string) $tokenNumber, 2, '0', STR_PAD_LEFT);
 
             $token = QueueToken::create([
@@ -214,12 +213,22 @@ class QueueService
         }
 
         usort($rows, function (array $a, array $b) {
-            $cmp = strcmp((string) $a['sort_time'], (string) $b['sort_time']);
-            if ($cmp !== 0) {
-                return $cmp;
+            $aNum = $a['token_number'] ?? null;
+            $bNum = $b['token_number'] ?? null;
+
+            if ($aNum !== null && $bNum !== null) {
+                return $aNum <=> $bNum;
             }
 
-            return ($a['token_number'] ?? 9999) <=> ($b['token_number'] ?? 9999);
+            if ($aNum !== null) {
+                return -1;
+            }
+
+            if ($bNum !== null) {
+                return 1;
+            }
+
+            return strcmp((string) $a['sort_time'], (string) $b['sort_time']);
         });
 
         $late = array_values(array_filter($rows, fn (array $r) => ! empty($r['is_late'])));
@@ -365,7 +374,7 @@ class QueueService
 
     public function checkInAppointment(Appointment $appointment): QueueToken
     {
-        $allowed = [AppointmentStatus::Booked, AppointmentStatus::CheckedIn, AppointmentStatus::NoShow];
+        $allowed = [AppointmentStatus::Booked, AppointmentStatus::CheckedIn, AppointmentStatus::NoShow, AppointmentStatus::Missed];
         if (! in_array($appointment->status, $allowed, true)) {
             throw new InvalidArgumentException('Only booked or missed appointments can be checked in.');
         }
@@ -375,7 +384,7 @@ class QueueService
             ? Carbon::parse($appointment->slot_time)->format('H:i:s')
             : null;
         $isLate = $slotTime && Carbon::now()->gt(Carbon::parse($date.' '.$slotTime));
-        $wasMissed = $appointment->status === AppointmentStatus::NoShow;
+        $wasMissed = $appointment->status === AppointmentStatus::NoShow || $appointment->status === AppointmentStatus::Missed;
 
         // Late / missed: new token at end of line — does not jump ahead of next patients or reuse slot priority.
         if ($isLate || $wasMissed) {
@@ -449,7 +458,7 @@ class QueueService
                 'token_number' => $token->token_number,
                 'display_code' => $token->display_code,
                 'status' => $token->status->value,
-                'position' => $index + 1,
+                'position' => $token->token_number ?? ($index + 1),
                 'slot_time' => $slotTime,
                 'joined_at' => $joinedAt?->toIso8601String(),
                 'called_at' => $token->called_at?->toIso8601String(),
@@ -763,31 +772,17 @@ class QueueService
 
     private function getOrderedQueue(int $doctorId, string $date)
     {
-        $now = Carbon::now();
-        $isToday = $date === $now->toDateString();
-
         return QueueToken::with(['patient', 'appointment', 'worksheet'])
             ->where('doctor_id', $doctorId)
             ->whereDate('queue_date', $date)
             ->whereNotIn('status', [QueueTokenStatus::Cancelled])
             ->get()
-            ->sortBy(function (QueueToken $token) use ($date, $now, $isToday) {
-                $slotTime = $token->appointment?->slot_time
-                    ? Carbon::parse($token->appointment->slot_time)->format('H:i:s')
-                    : null;
+            ->sortBy(function (QueueToken $token) {
+                // In-consultation always on top (0), waiting tokens strictly ascending by token_number (1)
+                $isConsulting = $token->status === QueueTokenStatus::InConsultation ? 0 : 1;
+                $tokenNum = $token->token_number ?? 999999;
 
-                $pastSlot = $isToday && $slotTime && $now->gt(Carbon::parse($date.' '.$slotTime));
-                $endOfLine = (bool) $token->end_of_line
-                    || ! $token->appointment_id
-                    || ($pastSlot && $token->status === QueueTokenStatus::Waiting);
-
-                // 0 = on-time booked (keep slot order). 1 = late / walk-in / new ticket (end of line).
-                $priority = $endOfLine ? 1 : 0;
-                $time = $endOfLine
-                    ? str_pad((string) $token->token_number, 6, '0', STR_PAD_LEFT)
-                    : ($slotTime ?? '99:99:99');
-
-                return "{$priority}-{$time}-{$token->token_number}";
+                return sprintf('%d-%06d', $isConsulting, $tokenNum);
             })
             ->values();
     }
@@ -902,7 +897,7 @@ class QueueService
                     'token_number' => $waitingToken->token_number,
                     'display_code' => $waitingToken->display_code,
                     'patient_name' => $sName,
-                    'position' => $idx + 1,
+                    'position' => $waitingToken->token_number ?? ($idx + 1),
                     'slot_time' => $slotTime,
                     'waiting_minutes' => $waitingToken->created_at ? max(0, $waitingToken->created_at->diffInMinutes($now)) : 0,
                 ];

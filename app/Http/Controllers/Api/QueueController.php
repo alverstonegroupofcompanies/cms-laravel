@@ -60,7 +60,6 @@ class QueueController extends Controller
 
         $board = $queueService->getReceptionDayBoard($date, $doctorId);
         $lastNumber = \App\Models\QueueToken::whereDate('queue_date', $date)
-            ->when($doctorId, fn ($q) => $q->where('doctor_id', $doctorId))
             ->max('token_number') ?? 0;
         $nextNumber = (int) $lastNumber + 1;
 

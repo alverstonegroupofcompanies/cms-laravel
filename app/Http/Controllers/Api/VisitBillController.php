@@ -13,7 +13,7 @@ class VisitBillController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $query = VisitBill::with(['items', 'patient', 'doctor', 'worksheet', 'queueToken'])
+        $query = VisitBill::with(['items', 'patient', 'doctor', 'worksheet.queueToken', 'queueToken'])
             ->orderByDesc('created_at');
 
         if ($request->filled('patient_id')) {
@@ -38,7 +38,7 @@ class VisitBillController extends Controller
     public function show(VisitBill $visitBill): JsonResponse
     {
         return response()->json(
-            $visitBill->load(['items', 'patient', 'doctor', 'worksheet', 'queueToken'])
+            $visitBill->load(['items', 'patient', 'doctor', 'worksheet.queueToken', 'queueToken'])
         );
     }
 
